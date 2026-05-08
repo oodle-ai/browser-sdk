@@ -1,0 +1,40 @@
+{
+  "name": "@oodle-ai/rum",
+  "version": "0.1.1",
+  "description": "Oodle Real User Monitoring SDK",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oodle-ai/browser-sdk"
+  },
+  "type": "module",
+  "main": "./dist/oodle-rum.cjs",
+  "module": "./dist/oodle-rum.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/oodle-rum.js",
+      "require": "./dist/oodle-rum.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vite build && tsc --emitDeclarationOnly",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "rrweb": "2.0.0-alpha.20",
+    "web-vitals": "^4.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^6.0.0",
+    "vite-plugin-dts": "^4.0.0"
+  }
+}

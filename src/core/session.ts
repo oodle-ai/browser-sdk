@@ -47,12 +47,37 @@ function loadSession(): SessionData | null {
   }
 }
 
-function saveSession(data: SessionData) {
+function writeSession(data: SessionData) {
   try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(data));
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify(data),
+    );
   } catch {
     // storage unavailable
   }
+}
+
+let saveTimer: ReturnType<
+  typeof setTimeout
+> | null = null;
+
+function saveSession(data: SessionData) {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    writeSession(data);
+  }, 1000);
+}
+
+function saveSessionImmediate(
+  data: SessionData,
+) {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  writeSession(data);
 }
 
 let currentSession: SessionData | null = null;
@@ -91,7 +116,8 @@ export function getSessionId(): string {
     now - currentSession.createdAt >
       SESSION_MAX_DURATION_MS
   ) {
-    const sampled = rollSample(_sessionSampleRate);
+    const sampled =
+      rollSample(_sessionSampleRate);
     currentSession = {
       id: generateId(),
       createdAt: now,
@@ -100,14 +126,16 @@ export function getSessionId(): string {
       errorCount: 0,
       actionCount: 0,
       sampled,
-      replaySampled: sampled &&
+      replaySampled:
+        sampled &&
         rollSample(_replaySampleRate),
     };
+    saveSessionImmediate(currentSession);
   } else {
     currentSession.lastActivity = now;
+    saveSession(currentSession);
   }
 
-  saveSession(currentSession);
   return currentSession.id;
 }
 
@@ -125,6 +153,40 @@ export function touchSession() {
   if (currentSession) {
     currentSession.lastActivity = Date.now();
     saveSession(currentSession);
+  }
+}
+
+let sessionVisHandler:
+  | (() => void)
+  | null = null;
+
+export function initSessionListeners() {
+  if (typeof document === 'undefined') return;
+  destroySessionListeners();
+  sessionVisHandler = () => {
+    if (
+      document.visibilityState === 'hidden' &&
+      currentSession
+    ) {
+      saveSessionImmediate(currentSession);
+    }
+  };
+  document.addEventListener(
+    'visibilitychange',
+    sessionVisHandler,
+  );
+}
+
+export function destroySessionListeners() {
+  if (
+    sessionVisHandler &&
+    typeof document !== 'undefined'
+  ) {
+    document.removeEventListener(
+      'visibilitychange',
+      sessionVisHandler,
+    );
+    sessionVisHandler = null;
   }
 }
 

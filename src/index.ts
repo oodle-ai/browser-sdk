@@ -1,5 +1,6 @@
 import {
   type OodleRumConfig,
+  type OtelConfig,
   setConfig,
   getConfig,
 } from './core/config';
@@ -7,6 +8,8 @@ import {
   getSessionId,
   setSampleRates,
   isReplaySampled,
+  initSessionListeners,
+  destroySessionListeners,
 } from './core/session';
 import {
   setUser,
@@ -15,7 +18,9 @@ import {
 } from './core/user';
 import {
   flushAll,
+  initTransportListeners,
   destroyTransportListeners,
+  setReinitCallback,
 } from './core/transport';
 import {
   initTags,
@@ -36,6 +41,15 @@ import {
   initReplay,
   stopReplay,
 } from './replay/recorder';
+import {
+  initTelemetry,
+  destroyTelemetry,
+} from './core/telemetry';
+
+const NativeMutationObserver =
+  typeof MutationObserver !== 'undefined'
+    ? MutationObserver
+    : null;
 
 let initialized = false;
 let teardownNavigation: (() => void) | null =
@@ -61,6 +75,13 @@ export const OodleRum = {
     );
     initialized = true;
 
+    initTransportListeners();
+    initSessionListeners();
+    initTelemetry();
+    setReinitCallback(() => {
+      initTransportListeners();
+    });
+
     if (
       config.sessionReplay !== false &&
       isReplaySampled()
@@ -74,6 +95,18 @@ export const OodleRum = {
       setupNavigationTracking();
     teardownClickTracking =
       setupClickTracking();
+
+    if (config.openTelemetry) {
+      import('./otel/tracing').then((m) =>
+        m.initOtelTracing(config),
+      ).catch((e) => {
+        console.warn(
+          '[@oodle-ai/rum] Failed to init' +
+            ' OpenTelemetry:',
+          e,
+        );
+      });
+    }
   },
 
   setTags(tags: Record<string, string>) {
@@ -111,6 +144,8 @@ export const OodleRum = {
     if (!initialized) return;
     stopReplay();
     destroyEvents();
+    destroyTelemetry();
+    destroySessionListeners();
     flushAll(true);
     clearFeatureFlags();
     destroyTransportListeners();
@@ -282,8 +317,9 @@ function setupClickTracking():
 
     cleanupPendingActivity();
 
+    if (!NativeMutationObserver) return;
     pendingActivityObserver =
-      new MutationObserver(() => {
+      new NativeMutationObserver(() => {
         cleanupPendingActivity();
         trackAction(
           'click',
@@ -301,7 +337,6 @@ function setupClickTracking():
       {
         childList: true,
         subtree: true,
-        attributes: true,
       },
     );
 
@@ -367,4 +402,8 @@ function getSelector(el: HTMLElement): string {
   return classes ? `${tag}.${classes}` : tag;
 }
 
-export type { OodleRumConfig, UserInfo };
+export type {
+  OodleRumConfig,
+  OtelConfig,
+  UserInfo,
+};

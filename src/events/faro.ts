@@ -21,51 +21,48 @@ import {
   getUserStatus,
 } from '../core/user';
 import { getFeatureFlags } from '../core/flags';
-import { enqueue, upsert } from '../core/transport';
+import {
+  enqueue,
+  upsert,
+  isServerRateLimited,
+} from '../core/transport';
+import { tryConsume } from '../core/rate-limiter';
+import { incrTelemetry } from '../core/telemetry';
+import {
+  getActiveTraceContext,
+} from '../core/otel-bridge';
 
 let teardownFns: Array<() => void> = [];
 
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 3000;
+let cachedContext: {
+  device_type: string;
+  browser_name: string;
+  os_name: string;
+  user_agent: string;
+  language: string;
+} | null = null;
 
-interface RateLimiter {
-  count: number;
-  windowStart: number;
-  warned: boolean;
-}
+const RATE_LIMITED_TYPES = [
+  'error',
+  'action',
+  'console',
+  'resource',
+];
 
-const rateLimiters: Record<string, RateLimiter> = {};
-
-function isRateLimited(eventType: string): boolean {
-  const limited = ['error', 'action', 'console'];
-  if (!limited.includes(eventType)) return false;
-
-  let rl = rateLimiters[eventType];
-  if (!rl) {
-    rl = {
-      count: 0,
-      windowStart: Date.now(),
-      warned: false,
-    };
-    rateLimiters[eventType] = rl;
+function isRateLimited(
+  eventType: string,
+): boolean {
+  if (
+    !RATE_LIMITED_TYPES.includes(eventType)
+  ) {
+    return false;
   }
-
-  const now = Date.now();
-  if (now - rl.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rl.count = 0;
-    rl.windowStart = now;
-    rl.warned = false;
+  if (isServerRateLimited(eventType)) {
+    incrTelemetry('events_rate_limited');
+    return true;
   }
-
-  rl.count++;
-  if (rl.count > RATE_LIMIT_MAX) {
-    if (!rl.warned) {
-      rl.warned = true;
-      console.warn(
-        `[@oodle-ai/rum] Rate limit reached for` +
-          ` ${eventType}: ${RATE_LIMIT_MAX}/min`,
-      );
-    }
+  if (!tryConsume(eventType)) {
+    incrTelemetry('events_rate_limited');
     return true;
   }
   return false;
@@ -80,18 +77,32 @@ function stripQuery(url: string): string {
   }
 }
 
+function ensureCachedContext() {
+  if (!cachedContext) {
+    cachedContext = {
+      device_type: getDeviceType(),
+      browser_name: getBrowserName(),
+      os_name: getOSName(),
+      user_agent: navigator.userAgent,
+      language: navigator.language,
+    };
+  }
+}
+
 function baseContext(): Record<string, unknown> {
+  ensureCachedContext();
   const counts = getSessionCounts();
   const flags = getFeatureFlags();
+  const config = getConfig();
   const ctx: Record<string, unknown> = {
     session_id: getSessionId(),
     user_id: getUserId(),
     user_name: getUserName(),
     user_email: getUserEmail(),
     user_status: getUserStatus(),
-    service: getConfig().service,
-    env: getConfig().env ?? '',
-    version: getConfig().version ?? '',
+    service: config.service,
+    env: config.env ?? '',
+    version: config.version ?? '',
     timestamp: new Date().toISOString(),
     view_url:
       window.location.origin +
@@ -99,11 +110,11 @@ function baseContext(): Record<string, unknown> {
     view_url_host: window.location.hostname,
     view_url_path: window.location.pathname,
     referrer_url: stripQuery(document.referrer),
-    device_type: getDeviceType(),
-    browser_name: getBrowserName(),
-    os_name: getOSName(),
-    user_agent: navigator.userAgent,
-    language: navigator.language,
+    device_type: cachedContext!.device_type,
+    browser_name: cachedContext!.browser_name,
+    os_name: cachedContext!.os_name,
+    user_agent: cachedContext!.user_agent,
+    language: cachedContext!.language,
     session_view_count: counts.viewCount,
     session_error_count: counts.errorCount,
     session_action_count: counts.actionCount,
@@ -122,38 +133,52 @@ function scheduleIdleWork(fn: () => void) {
   }
 }
 
+const EVENTS_BATCH_KEY = 'events';
+
 function emitEvent(
-  path: string,
-  data: Record<string, unknown>,
+  buildData: () => Record<string, unknown>,
 ) {
   if (!isSessionSampled()) return;
-  const eventType = data.event_type as string;
+  if (isServerRateLimited('events')) return;
+  const data = buildData();
+  const eventType =
+    data.event_type as string;
   if (isRateLimited(eventType)) return;
   incrementSessionCount(eventType);
   const ctx = baseContext();
-  enqueue(path, { ...ctx, ...data });
+  enqueue(
+    EVENTS_BATCH_KEY,
+    { ...ctx, ...data },
+  );
 }
 
 function emitEventDeferred(
-  path: string,
-  data: Record<string, unknown>,
+  buildData: () => Record<string, unknown>,
 ) {
-  scheduleIdleWork(() => emitEvent(path, data));
+  scheduleIdleWork(() =>
+    emitEvent(buildData),
+  );
 }
 
 function emitViewEvent(
-  path: string,
-  data: Record<string, unknown>,
+  buildData: () => Record<string, unknown>,
 ) {
   if (!isSessionSampled()) return;
-  const eventType = data.event_type as string;
+  if (isServerRateLimited('events')) return;
+  const data = buildData();
+  const eventType =
+    data.event_type as string;
   incrementSessionCount(eventType);
   const ctx = baseContext();
   const viewId =
     (ctx.session_id as string) +
     ':' +
     ctx.view_url_path;
-  upsert(path, viewId, { ...ctx, ...data });
+  upsert(
+    EVENTS_BATCH_KEY,
+    viewId,
+    { ...ctx, ...data },
+  );
 }
 
 export function initEvents() {
@@ -170,28 +195,31 @@ export function initEvents() {
 
 function initErrorTracking() {
   const onError = (event: ErrorEvent) => {
-    emitEvent('/v1/rum/events', {
+    emitEvent(() => ({
       event_type: 'error',
       error_message: event.message ?? '',
-      error_type: event.error?.name ?? 'Error',
-      error_stack: event.error?.stack ?? '',
+      error_type:
+        event.error?.name ?? 'Error',
+      error_stack:
+        event.error?.stack ?? '',
       error_source: 'source',
-    });
+    }));
   };
 
   const onUnhandledRejection = (
     event: PromiseRejectionEvent,
   ) => {
     const reason = event.reason;
-    emitEvent('/v1/rum/events', {
+    emitEvent(() => ({
       event_type: 'error',
       error_message:
         reason?.message ?? String(reason),
       error_type:
-        reason?.name ?? 'UnhandledRejection',
+        reason?.name ??
+        'UnhandledRejection',
       error_stack: reason?.stack ?? '',
       error_source: 'promise',
-    });
+    }));
   };
 
   window.addEventListener('error', onError);
@@ -225,24 +253,26 @@ function initConsoleTracking() {
   };
 
   console.error = (...args: unknown[]) => {
-    emitEvent('/v1/rum/events', {
+    const msg = args
+      .map(safeStringify)
+      .join(' ');
+    emitEvent(() => ({
       event_type: 'console',
       console_level: 'error',
-      console_message: args
-        .map(safeStringify)
-        .join(' '),
-    });
+      console_message: msg,
+    }));
     original.error.apply(console, args);
   };
 
   console.warn = (...args: unknown[]) => {
-    emitEvent('/v1/rum/events', {
+    const msg = args
+      .map(safeStringify)
+      .join(' ');
+    emitEvent(() => ({
       event_type: 'console',
       console_level: 'warn',
-      console_message: args
-        .map(safeStringify)
-        .join(' '),
-    });
+      console_message: msg,
+    }));
     original.warn.apply(console, args);
   };
 
@@ -270,7 +300,7 @@ function flushViewMetrics() {
     viewMetrics.dom_complete_ms ||
     0;
   const hasLoadTiming = loadMs > 0;
-  emitViewEvent('/v1/rum/events', {
+  emitViewEvent(() => ({
     event_type: hasLoadTiming
       ? 'page_load'
       : 'view',
@@ -287,7 +317,7 @@ function flushViewMetrics() {
       viewMetrics.dom_interactive_ms ?? 0,
     dom_complete_ms:
       viewMetrics.dom_complete_ms ?? 0,
-  });
+  }));
 }
 
 function scheduleViewMetricsFlush() {
@@ -387,14 +417,20 @@ function initResourceTracking() {
           continue;
         }
 
-        emitEventDeferred('/v1/rum/events', {
-          event_type: 'resource',
-          resource_url: stripQuery(res.name),
-          resource_method: '',
-          resource_duration_ms: res.duration,
-          resource_size: res.transferSize ?? 0,
-          resource_type: initiator,
-        });
+        const url = stripQuery(res.name);
+        const dur = res.duration;
+        const sz = res.transferSize ?? 0;
+        const init = initiator;
+        emitEventDeferred(
+          () => ({
+            event_type: 'resource',
+            resource_url: url,
+            resource_method: '',
+            resource_duration_ms: dur,
+            resource_size: sz,
+            resource_type: init,
+          }),
+        );
       }
     },
   );
@@ -524,7 +560,11 @@ function initFetchPatching() {
 
     let traceId = '';
     let spanId = '';
-    if (shouldTrace(url)) {
+    const otelCtx = getActiveTraceContext();
+    if (otelCtx) {
+      traceId = otelCtx.traceId;
+      spanId = otelCtx.spanId;
+    } else if (shouldTrace(url)) {
       traceId = generateHexId(16);
       spanId = generateHexId(8);
       const traceparent =
@@ -532,7 +572,10 @@ function initFetchPatching() {
       const headers = new Headers(
         init?.headers ?? {},
       );
-      headers.set('traceparent', traceparent);
+      headers.set(
+        'traceparent',
+        traceparent,
+      );
       init = { ...init, headers };
     }
 
@@ -562,56 +605,65 @@ function initFetchPatching() {
               );
           } catch {}
         }
-        const eventData: Record<
-          string,
-          unknown
-        > = {
-          event_type: 'resource',
-          resource_url: stripQuery(url),
-          resource_method: method,
-          resource_status: response.status,
-          resource_duration_ms:
-            Math.round(duration),
-          resource_size: 0,
-          resource_type: 'fetch',
-        };
-        if (traceId) {
-          eventData.trace_id = traceId;
-          eventData.span_id = spanId;
-        }
-        if (requestBody) {
-          eventData.request_body = requestBody;
-        }
-        if (responseBody) {
-          eventData.response_body = responseBody;
-        }
-        emitEvent('/v1/rum/events', eventData);
+        const status = response.status;
+        const dur = Math.round(
+          performance.now() - start,
+        );
+        emitEvent(() => {
+            const d: Record<
+              string,
+              unknown
+            > = {
+              event_type: 'resource',
+              resource_url: stripQuery(url),
+              resource_method: method,
+              resource_status: status,
+              resource_duration_ms: dur,
+              resource_size: 0,
+              resource_type: 'fetch',
+            };
+            if (traceId) {
+              d.trace_id = traceId;
+              d.span_id = spanId;
+            }
+            if (requestBody) {
+              d.request_body = requestBody;
+            }
+            if (responseBody) {
+              d.response_body = responseBody;
+            }
+            return d;
+          },
+        );
         return response;
       })
       .catch((err) => {
-        const duration =
-          performance.now() - start;
-        const eventData: Record<
-          string,
-          unknown
-        > = {
-          event_type: 'resource',
-          resource_url: stripQuery(url),
-          resource_method: method,
-          resource_status: 0,
-          resource_duration_ms:
-            Math.round(duration),
-          resource_size: 0,
-          resource_type: 'fetch',
-        };
-        if (traceId) {
-          eventData.trace_id = traceId;
-          eventData.span_id = spanId;
-        }
-        if (requestBody) {
-          eventData.request_body = requestBody;
-        }
-        emitEvent('/v1/rum/events', eventData);
+        const dur = Math.round(
+          performance.now() - start,
+        );
+        emitEvent(() => {
+            const d: Record<
+              string,
+              unknown
+            > = {
+              event_type: 'resource',
+              resource_url: stripQuery(url),
+              resource_method: method,
+              resource_status: 0,
+              resource_duration_ms: dur,
+              resource_size: 0,
+              resource_type: 'fetch',
+            };
+            if (traceId) {
+              d.trace_id = traceId;
+              d.span_id = spanId;
+            }
+            if (requestBody) {
+              d.request_body = requestBody;
+            }
+            return d;
+          },
+        );
         throw err;
       });
   };
@@ -671,7 +723,11 @@ function initXHRPatching() {
 
     let traceId = '';
     let spanId = '';
-    if (shouldTrace(xhrUrl)) {
+    const otelCtx = getActiveTraceContext();
+    if (otelCtx) {
+      traceId = otelCtx.traceId;
+      spanId = otelCtx.spanId;
+    } else if (shouldTrace(xhrUrl)) {
       traceId = generateHexId(16);
       spanId = generateHexId(8);
       origSetHeader.call(
@@ -695,42 +751,52 @@ function initXHRPatching() {
     }
 
     const start = performance.now();
+    const xhrThis = this;
+    const tid = traceId;
+    const sid = spanId;
+    const reqBody = requestBody;
+    const bc = bodyCfg;
     this.addEventListener('loadend', () => {
-      const duration =
-        performance.now() - start;
-      const eventData: Record<
-        string,
-        unknown
-      > = {
-        event_type: 'resource',
-        resource_url: stripQuery(xhrUrl),
-        resource_method:
-          (this as any).__oodleMethod ?? 'GET',
-        resource_status: this.status,
-        resource_duration_ms:
-          Math.round(duration),
-        resource_size: 0,
-        resource_type: 'xhr',
-      };
-      if (traceId) {
-        eventData.trace_id = traceId;
-        eventData.span_id = spanId;
-      }
-      if (requestBody) {
-        eventData.request_body = requestBody;
-      }
-      if (bodyCfg) {
-        try {
-          const text =
-            this.responseText ?? '';
-          eventData.response_body =
-            truncateBody(
-              text,
-              bodyCfg.maxBodySize ?? 65536,
-            );
-        } catch {}
-      }
-      emitEvent('/v1/rum/events', eventData);
+      const dur = Math.round(
+        performance.now() - start,
+      );
+      const xhrStatus = xhrThis.status;
+      const xhrMethod =
+        (xhrThis as any).__oodleMethod ??
+        'GET';
+      emitEvent(() => {
+          const d: Record<
+            string,
+            unknown
+          > = {
+            event_type: 'resource',
+            resource_url: stripQuery(xhrUrl),
+            resource_method: xhrMethod,
+            resource_status: xhrStatus,
+            resource_duration_ms: dur,
+            resource_size: 0,
+            resource_type: 'xhr',
+          };
+          if (tid) {
+            d.trace_id = tid;
+            d.span_id = sid;
+          }
+          if (reqBody) {
+            d.request_body = reqBody;
+          }
+          if (bc) {
+            try {
+              const text =
+                xhrThis.responseText ?? '';
+              d.response_body = truncateBody(
+                text,
+                bc.maxBodySize ?? 65536,
+              );
+            } catch {}
+          }
+          return d;
+        },
+      );
     });
     return origSend.apply(this, [body]);
   };
@@ -817,17 +883,21 @@ function initLongTaskTracking() {
   ) {
     return;
   }
+
+  if (initLoAFTracking()) return;
+
   try {
     const observer = new PerformanceObserver(
       (list) => {
         for (const entry of list.getEntries()) {
           if (entry.duration < 50) continue;
-          emitEventDeferred('/v1/rum/events', {
+          const dur = Math.round(
+            entry.duration,
+          );
+          emitEventDeferred(() => ({
             event_type: 'long_task',
-            long_task_duration_ms: Math.round(
-              entry.duration,
-            ),
-          });
+            long_task_duration_ms: dur,
+          }));
         }
       },
     );
@@ -843,10 +913,59 @@ function initLongTaskTracking() {
   }
 }
 
+function initLoAFTracking(): boolean {
+  try {
+    const observer = new PerformanceObserver(
+      (list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration < 50) continue;
+          const loaf = entry as any;
+          const scripts = loaf.scripts ?? [];
+          const topScript =
+            scripts.length > 0
+              ? scripts[0]
+              : null;
+          const dur = Math.round(
+            entry.duration,
+          );
+          const blocking = Math.round(
+            loaf.blockingDuration ?? 0,
+          );
+          const scriptUrl =
+            topScript?.sourceURL ?? '';
+          const scriptFn =
+            topScript?.sourceFunctionName ??
+            '';
+          const invoker =
+            topScript?.invokerType ?? '';
+          emitEventDeferred(() => ({
+            event_type: 'long_task',
+            long_task_duration_ms: dur,
+            long_task_blocking_ms: blocking,
+            long_task_script_url: scriptUrl,
+            long_task_script_fn: scriptFn,
+            long_task_invoker: invoker,
+          }));
+        }
+      },
+    );
+    observer.observe({
+      type: 'long-animation-frame',
+      buffered: true,
+    });
+    teardownFns.push(() =>
+      observer.disconnect(),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function trackPageView() {
-  emitEvent('/v1/rum/events', {
+  emitEvent(() => ({
     event_type: 'view',
-  });
+  }));
 }
 
 export function trackAction(
@@ -858,34 +977,38 @@ export function trackAction(
   clickX?: number,
   clickY?: number,
 ) {
-  const data: Record<string, unknown> = {
-    event_type: 'action',
-    action_type: type,
-    action_target: target,
-    action_selector: selector,
-    action_text: text,
-    is_frustration: isFrustration ? 1 : 0,
-  };
-  if (clickX !== undefined) {
-    data.click_x = clickX;
-    data.click_y = clickY;
-    data.viewport_width = window.innerWidth;
-    data.viewport_height = window.innerHeight;
-  }
-  emitEvent('/v1/rum/events', data);
+  emitEvent(() => {
+    const data: Record<string, unknown> = {
+      event_type: 'action',
+      action_type: type,
+      action_target: target,
+      action_selector: selector,
+      action_text: text,
+      is_frustration: isFrustration ? 1 : 0,
+    };
+    if (clickX !== undefined) {
+      data.click_x = clickX;
+      data.click_y = clickY;
+      data.viewport_width =
+        window.innerWidth;
+      data.viewport_height =
+        window.innerHeight;
+    }
+    return data;
+  });
 }
 
 export function trackCustomEvent(
   name: string,
   properties?: Record<string, unknown>,
 ) {
-  emitEvent('/v1/rum/events', {
+  emitEvent(() => ({
     event_type: 'custom',
     custom_event_name: name,
     custom_event_properties: properties
       ? JSON.stringify(properties)
       : '',
-  });
+  }));
 }
 
 function getDeviceType(): string {

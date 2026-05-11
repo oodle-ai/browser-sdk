@@ -1,0 +1,9 @@
+type Payload = Record<string, unknown>;
+export declare function enqueue(batchKey: string, item: Payload): void;
+export declare function upsert(batchKey: string, key: string, item: Payload): void;
+export declare function flushAll(isExit?: boolean): void;
+export declare function isServerRateLimited(category: string): boolean;
+export declare function setReinitCallback(cb: () => void): void;
+export declare function initTransportListeners(): void;
+export declare function destroyTransportListeners(): void;
+export {};

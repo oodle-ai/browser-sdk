@@ -10,7 +10,10 @@ export default defineConfig({
       fileName: 'oodle-rum',
     },
     rollupOptions: {
-      external: [],
+      external: [
+        /^@opentelemetry\//,
+        'zone.js',
+      ],
     },
     sourcemap: false,
   },

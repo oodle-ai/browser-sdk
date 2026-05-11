@@ -1,8 +1,5 @@
-declare interface NetworkBodiesConfig {
-    urls: (string | RegExp)[];
-    maxBodySize?: number;
-}
-
+import { type OodleRumConfig, type OtelConfig } from './core/config';
+import { type UserInfo } from './core/user';
 export declare const OodleRum: {
     init(config: OodleRumConfig): void;
     setTags(tags: Record<string, string>): void;
@@ -14,27 +11,4 @@ export declare const OodleRum: {
     flush(): void;
     stop(): void;
 };
-
-export declare interface OodleRumConfig {
-    instanceId: string;
-    apiKey: string;
-    endpoint: string;
-    service: string;
-    env?: string;
-    version?: string;
-    sessionReplay?: boolean;
-    sessionSampleRate?: number;
-    replaySampleRate?: number;
-    privacyLevel?: 'mask-user-input' | 'mask' | 'allow';
-    allowedTracingUrls?: (string | RegExp)[];
-    forwardNetworkBodies?: NetworkBodiesConfig;
-    tags?: Record<string, string>;
-}
-
-export declare interface UserInfo {
-    id: string;
-    name?: string;
-    email?: string;
-}
-
-export { }
+export type { OodleRumConfig, OtelConfig, UserInfo, };

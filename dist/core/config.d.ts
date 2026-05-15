@@ -2,6 +2,9 @@ export interface NetworkBodiesConfig {
     urls: (string | RegExp)[];
     maxBodySize?: number;
 }
+export interface NetworkHeadersConfig {
+    urls: (string | RegExp)[];
+}
 export interface OtelConfig {
     enabled: boolean;
     tracesEndpoint?: string;
@@ -20,6 +23,7 @@ export interface OodleRumConfig {
     privacyLevel?: 'mask-user-input' | 'mask' | 'allow';
     allowedTracingUrls?: (string | RegExp)[];
     forwardNetworkBodies?: NetworkBodiesConfig;
+    forwardNetworkHeaders?: NetworkHeadersConfig;
     tags?: Record<string, string>;
     openTelemetry?: boolean | OtelConfig;
     flushIntervalMs?: number;

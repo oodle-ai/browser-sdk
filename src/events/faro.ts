@@ -7,7 +7,10 @@ import {
   onTTFB,
 } from 'web-vitals';
 import { getConfig } from '../core/config';
-import type { NetworkBodiesConfig } from '../core/config';
+import type {
+  NetworkBodiesConfig,
+  NetworkHeadersConfig,
+} from '../core/config';
 import {
   getSessionId,
   incrementSessionCount,
@@ -189,6 +192,7 @@ export function initEvents() {
   initPageLoadTracking();
   initFetchPatching();
   initXHRPatching();
+  initIframePatching();
   initLongTaskTracking();
   initViewMetricsVisibility();
 }
@@ -468,35 +472,144 @@ function generateHexId(bytes: number): string {
     .join('');
 }
 
+function resolveUrl(url: string): string {
+  try {
+    return new URL(url, location.href).href;
+  } catch {
+    return url;
+  }
+}
+
 function matchesUrlPattern(
-  url: string,
+  resolved: string,
+  raw: string,
   patterns: (string | RegExp)[],
 ): boolean {
   return patterns.some((p) =>
     typeof p === 'string'
-      ? url.startsWith(p)
-      : p.test(url),
+      ? resolved.startsWith(p) ||
+        raw.startsWith(p)
+      : p.test(resolved) || p.test(raw),
   );
 }
 
-function shouldTrace(url: string): boolean {
-  const patterns =
-    getConfig().allowedTracingUrls;
-  if (!patterns || patterns.length === 0) {
-    return false;
-  }
-  return matchesUrlPattern(url, patterns);
+interface UrlDecisions {
+  resolved: string;
+  trace: boolean;
+  bodyCfg: NetworkBodiesConfig | null;
+  captureHeaders: boolean;
 }
 
-function shouldCaptureBody(
+function resolveUrlDecisions(
   url: string,
-): NetworkBodiesConfig | null {
-  const cfg = getConfig().forwardNetworkBodies;
-  if (!cfg) return null;
-  if (matchesUrlPattern(url, cfg.urls)) {
-    return cfg;
+): UrlDecisions {
+  const resolved = resolveUrl(url);
+  const config = getConfig();
+
+  let trace = false;
+  const tracingUrls =
+    config.allowedTracingUrls;
+  if (tracingUrls && tracingUrls.length > 0) {
+    trace = matchesUrlPattern(
+      resolved,
+      url,
+      tracingUrls,
+    );
   }
-  return null;
+
+  let bodyCfg: NetworkBodiesConfig | null =
+    null;
+  const bodyConfig =
+    config.forwardNetworkBodies;
+  if (bodyConfig) {
+    if (
+      matchesUrlPattern(
+        resolved,
+        url,
+        bodyConfig.urls,
+      )
+    ) {
+      bodyCfg = bodyConfig;
+    }
+  }
+
+  let captureHeaders = false;
+  const hdrConfig =
+    config.forwardNetworkHeaders;
+  if (hdrConfig) {
+    captureHeaders = matchesUrlPattern(
+      resolved,
+      url,
+      hdrConfig.urls,
+    );
+  }
+
+  return {
+    resolved,
+    trace,
+    bodyCfg,
+    captureHeaders,
+  };
+}
+
+const SENSITIVE_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'proxy-authorization',
+]);
+
+function headersToRecord(
+  h:
+    | Headers
+    | Record<string, string>
+    | [string, string][]
+    | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!h) return out;
+  if (h instanceof Headers) {
+    h.forEach((v, k) => {
+      const lk = k.toLowerCase();
+      if (!SENSITIVE_HEADERS.has(lk)) {
+        out[lk] = v;
+      }
+    });
+  } else if (Array.isArray(h)) {
+    for (const [k, v] of h) {
+      const lk = k.toLowerCase();
+      if (!SENSITIVE_HEADERS.has(lk)) {
+        out[lk] = v;
+      }
+    }
+  } else {
+    for (const k of Object.keys(h)) {
+      const lk = k.toLowerCase();
+      if (!SENSITIVE_HEADERS.has(lk)) {
+        out[lk] = h[k];
+      }
+    }
+  }
+  return out;
+}
+
+function parseRawHeaders(
+  raw: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of raw.split('\r\n')) {
+    if (!line) continue;
+    const idx = line.indexOf(':');
+    if (idx < 0) continue;
+    const k = line
+      .slice(0, idx)
+      .trim()
+      .toLowerCase();
+    if (SENSITIVE_HEADERS.has(k)) continue;
+    out[k] = line.slice(idx + 1).trim();
+  }
+  return out;
 }
 
 function truncateBody(
@@ -520,7 +633,8 @@ async function readBodyLimited(
   const decoder = new TextDecoder();
   let result = '';
   while (result.length < maxBytes) {
-    const { done, value } = await reader.read();
+    const { done, value } =
+      await reader.read();
     if (done) break;
     result += decoder.decode(value, {
       stream: true,
@@ -530,24 +644,63 @@ async function readBodyLimited(
   return result.slice(0, maxBytes);
 }
 
-function initFetchPatching() {
-  if (typeof window === 'undefined') return;
-  if (typeof window.fetch === 'undefined') return;
+function extractUrl(
+  input: RequestInfo | URL,
+): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
 
-  const originalFetch = window.fetch;
-  window.fetch = function (
+function captureReqHeaders(
+  headers:
+    | HeadersInit
+    | undefined,
+): string {
+  if (!headers) return '';
+  try {
+    return JSON.stringify(
+      headersToRecord(
+        headers as
+          | Headers
+          | Record<string, string>
+          | [string, string][],
+      ),
+    );
+  } catch {
+    return '';
+  }
+}
+
+function captureResHeaders(
+  headers: Headers,
+): string {
+  try {
+    return JSON.stringify(
+      headersToRecord(headers),
+    );
+  } catch {
+    return '';
+  }
+}
+
+interface FetchWrapOpts {
+  injectTracing: boolean;
+}
+
+function wrapFetch(
+  target: { fetch: typeof fetch },
+  origFetch: typeof fetch,
+  opts: FetchWrapOpts,
+): () => void {
+  const patched = function (
+    this: any,
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    const url =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
-
+    const url = extractUrl(input);
     if (isOodleInternalUrl(url)) {
-      return originalFetch.apply(this, [
+      return origFetch.apply(this, [
         input,
         init,
       ] as any);
@@ -557,136 +710,179 @@ function initFetchPatching() {
       init?.method ?? 'GET'
     ).toUpperCase();
     const start = performance.now();
+    const decisions =
+      resolveUrlDecisions(url);
 
     let traceId = '';
     let spanId = '';
-    const otelCtx = getActiveTraceContext();
-    if (otelCtx) {
-      traceId = otelCtx.traceId;
-      spanId = otelCtx.spanId;
-    } else if (shouldTrace(url)) {
-      traceId = generateHexId(16);
-      spanId = generateHexId(8);
-      const traceparent =
-        `00-${traceId}-${spanId}-01`;
-      const headers = new Headers(
-        init?.headers ?? {},
-      );
-      headers.set(
-        'traceparent',
-        traceparent,
-      );
-      init = { ...init, headers };
+    if (opts.injectTracing) {
+      const otelCtx =
+        getActiveTraceContext();
+      if (otelCtx) {
+        traceId = otelCtx.traceId;
+        spanId = otelCtx.spanId;
+      } else if (decisions.trace) {
+        traceId = generateHexId(16);
+        spanId = generateHexId(8);
+        const headers = new Headers(
+          init?.headers ?? {},
+        );
+        headers.set(
+          'traceparent',
+          `00-${traceId}-${spanId}-01`,
+        );
+        init = { ...init, headers };
+      }
     }
 
-    const bodyCfg = shouldCaptureBody(url);
     let requestBody = '';
-    if (bodyCfg && init?.body) {
+    if (decisions.bodyCfg && init?.body) {
       if (typeof init.body === 'string') {
         requestBody = truncateBody(
           init.body,
-          bodyCfg.maxBodySize ?? 65536,
+          decisions.bodyCfg.maxBodySize ??
+            65536,
         );
       }
     }
 
-    return originalFetch
+    let reqHdrsJson = '';
+    if (decisions.captureHeaders) {
+      if (init?.headers) {
+        reqHdrsJson = captureReqHeaders(
+          init.headers,
+        );
+      } else if (
+        input instanceof Request
+      ) {
+        reqHdrsJson = captureResHeaders(
+          input.headers,
+        );
+      }
+    }
+
+    return origFetch
       .apply(this, [input, init] as any)
-      .then(async (response) => {
-        const duration =
-          performance.now() - start;
-        let responseBody = '';
-        if (bodyCfg) {
-          try {
-            responseBody =
-              await readBodyLimited(
-                response.clone(),
-                bodyCfg.maxBodySize ?? 65536,
-              );
-          } catch {}
-        }
+      .then((response: Response) => {
         const status = response.status;
         const dur = Math.round(
           performance.now() - start,
         );
-        emitEvent(() => {
-            const d: Record<
-              string,
-              unknown
-            > = {
-              event_type: 'resource',
-              resource_url: stripQuery(url),
-              resource_method: method,
-              resource_status: status,
-              resource_duration_ms: dur,
-              resource_size: 0,
-              resource_type: 'fetch',
-            };
-            if (traceId) {
-              d.trace_id = traceId;
-              d.span_id = spanId;
-            }
-            if (requestBody) {
-              d.request_body = requestBody;
-            }
-            if (responseBody) {
-              d.response_body = responseBody;
-            }
-            return d;
-          },
-        );
+        let resHdrsJson = '';
+        if (decisions.captureHeaders) {
+          resHdrsJson = captureResHeaders(
+            response.headers,
+          );
+        }
+        const emitBase = () => {
+          const d: Record<
+            string,
+            unknown
+          > = {
+            event_type: 'resource',
+            resource_url: stripQuery(url),
+            resource_method: method,
+            resource_status: status,
+            resource_duration_ms: dur,
+            resource_size: 0,
+            resource_type: 'fetch',
+          };
+          if (traceId) {
+            d.trace_id = traceId;
+            d.span_id = spanId;
+          }
+          if (requestBody) {
+            d.request_body = requestBody;
+          }
+          if (reqHdrsJson) {
+            d.request_headers = reqHdrsJson;
+          }
+          if (resHdrsJson) {
+            d.response_headers =
+              resHdrsJson;
+          }
+          return d;
+        };
+        if (decisions.bodyCfg) {
+          const maxSize =
+            decisions.bodyCfg.maxBodySize ??
+            65536;
+          readBodyLimited(
+            response.clone(),
+            maxSize,
+          )
+            .then((body) => {
+              emitEvent(() => {
+                const d = emitBase();
+                if (body) {
+                  d.response_body = body;
+                }
+                return d;
+              });
+            })
+            .catch(() => {
+              emitEvent(emitBase);
+            });
+        } else {
+          emitEvent(emitBase);
+        }
         return response;
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         const dur = Math.round(
           performance.now() - start,
         );
         emitEvent(() => {
-            const d: Record<
-              string,
-              unknown
-            > = {
-              event_type: 'resource',
-              resource_url: stripQuery(url),
-              resource_method: method,
-              resource_status: 0,
-              resource_duration_ms: dur,
-              resource_size: 0,
-              resource_type: 'fetch',
-            };
-            if (traceId) {
-              d.trace_id = traceId;
-              d.span_id = spanId;
-            }
-            if (requestBody) {
-              d.request_body = requestBody;
-            }
-            return d;
-          },
-        );
+          const d: Record<
+            string,
+            unknown
+          > = {
+            event_type: 'resource',
+            resource_url: stripQuery(url),
+            resource_method: method,
+            resource_status: 0,
+            resource_duration_ms: dur,
+            resource_size: 0,
+            resource_type: 'fetch',
+          };
+          if (traceId) {
+            d.trace_id = traceId;
+            d.span_id = spanId;
+          }
+          if (requestBody) {
+            d.request_body = requestBody;
+          }
+          if (reqHdrsJson) {
+            d.request_headers = reqHdrsJson;
+          }
+          return d;
+        });
         throw err;
       });
   };
-
-  teardownFns.push(() => {
-    window.fetch = originalFetch;
-  });
+  target.fetch = patched as typeof fetch;
+  return () => {
+    target.fetch = origFetch;
+  };
 }
 
-function initXHRPatching() {
-  if (typeof window === 'undefined') return;
-  if (typeof XMLHttpRequest === 'undefined') {
-    return;
-  }
+interface XHRProtos {
+  open: typeof XMLHttpRequest.prototype.open;
+  send: typeof XMLHttpRequest.prototype.send;
+  setRequestHeader: typeof XMLHttpRequest
+    .prototype.setRequestHeader;
+}
 
-  const origOpen =
-    XMLHttpRequest.prototype.open;
-  const origSend =
-    XMLHttpRequest.prototype.send;
-  const origSetHeader =
-    XMLHttpRequest.prototype.setRequestHeader;
+function wrapXHR(
+  proto: XMLHttpRequest,
+  origSetHeader: XHRProtos['setRequestHeader'],
+  opts: FetchWrapOpts,
+): () => void {
+  const origOpen = proto.open;
+  const origSend = proto.send;
+  const origSH = origSetHeader;
 
-  XMLHttpRequest.prototype.open = function (
+  (proto as any).open = function (
     method: string,
     url: string | URL,
     async_?: boolean,
@@ -699,6 +895,8 @@ function initXHRPatching() {
       typeof url === 'string'
         ? url
         : url.href;
+    (this as any).__oodleReqHeaders =
+      {} as Record<string, string>;
     return origOpen.call(
       this,
       method,
@@ -709,7 +907,19 @@ function initXHRPatching() {
     );
   };
 
-  XMLHttpRequest.prototype.send = function (
+  (proto as any).setRequestHeader = function (
+    name: string,
+    value: string,
+  ) {
+    const hdrs =
+      (this as any).__oodleReqHeaders;
+    if (hdrs) {
+      hdrs[name.toLowerCase()] = value;
+    }
+    return origSH.call(this, name, value);
+  };
+
+  (proto as any).send = function (
     body?:
       | Document
       | XMLHttpRequestBodyInit
@@ -721,33 +931,52 @@ function initXHRPatching() {
       return origSend.apply(this, [body]);
     }
 
+    const decisions =
+      resolveUrlDecisions(xhrUrl);
+
     let traceId = '';
     let spanId = '';
-    const otelCtx = getActiveTraceContext();
-    if (otelCtx) {
-      traceId = otelCtx.traceId;
-      spanId = otelCtx.spanId;
-    } else if (shouldTrace(xhrUrl)) {
-      traceId = generateHexId(16);
-      spanId = generateHexId(8);
-      origSetHeader.call(
-        this,
-        'traceparent',
-        `00-${traceId}-${spanId}-01`,
-      );
+    if (opts.injectTracing) {
+      const otelCtx =
+        getActiveTraceContext();
+      if (otelCtx) {
+        traceId = otelCtx.traceId;
+        spanId = otelCtx.spanId;
+      } else if (decisions.trace) {
+        traceId = generateHexId(16);
+        spanId = generateHexId(8);
+        origSH.call(
+          this,
+          'traceparent',
+          `00-${traceId}-${spanId}-01`,
+        );
+      }
     }
 
-    const bodyCfg = shouldCaptureBody(xhrUrl);
     let requestBody = '';
     if (
-      bodyCfg &&
+      decisions.bodyCfg &&
       body &&
       typeof body === 'string'
     ) {
       requestBody = truncateBody(
         body,
-        bodyCfg.maxBodySize ?? 65536,
+        decisions.bodyCfg.maxBodySize ?? 65536,
       );
+    }
+
+    let reqHdrsJson = '';
+    if (decisions.captureHeaders) {
+      try {
+        const hdrs =
+          (this as any).__oodleReqHeaders;
+        if (
+          hdrs &&
+          Object.keys(hdrs).length > 0
+        ) {
+          reqHdrsJson = JSON.stringify(hdrs);
+        }
+      } catch {}
     }
 
     const start = performance.now();
@@ -755,16 +984,19 @@ function initXHRPatching() {
     const tid = traceId;
     const sid = spanId;
     const reqBody = requestBody;
-    const bc = bodyCfg;
-    this.addEventListener('loadend', () => {
-      const dur = Math.round(
-        performance.now() - start,
-      );
-      const xhrStatus = xhrThis.status;
-      const xhrMethod =
-        (xhrThis as any).__oodleMethod ??
-        'GET';
-      emitEvent(() => {
+    const bc = decisions.bodyCfg;
+    const rh = reqHdrsJson;
+    const doHdrs = decisions.captureHeaders;
+    this.addEventListener(
+      'loadend',
+      () => {
+        const dur = Math.round(
+          performance.now() - start,
+        );
+        const xhrMethod =
+          (xhrThis as any).__oodleMethod ??
+          'GET';
+        emitEvent(() => {
           const d: Record<
             string,
             unknown
@@ -772,7 +1004,7 @@ function initXHRPatching() {
             event_type: 'resource',
             resource_url: stripQuery(xhrUrl),
             resource_method: xhrMethod,
-            resource_status: xhrStatus,
+            resource_status: xhrThis.status,
             resource_duration_ms: dur,
             resource_size: 0,
             resource_type: 'xhr',
@@ -794,16 +1026,172 @@ function initXHRPatching() {
               );
             } catch {}
           }
+          if (rh) {
+            d.request_headers = rh;
+          }
+          if (doHdrs) {
+            try {
+              const raw =
+                xhrThis
+                  .getAllResponseHeaders();
+              if (raw) {
+                d.response_headers =
+                  JSON.stringify(
+                    parseRawHeaders(raw),
+                  );
+              }
+            } catch {}
+          }
           return d;
-        },
-      );
-    });
+        });
+      },
+    );
     return origSend.apply(this, [body]);
   };
 
+  return () => {
+    (proto as any).open = origOpen;
+    (proto as any).send = origSend;
+    (proto as any).setRequestHeader = origSH;
+  };
+}
+
+const TRACING_OPTS: FetchWrapOpts = {
+  injectTracing: true,
+};
+const NO_TRACING_OPTS: FetchWrapOpts = {
+  injectTracing: false,
+};
+
+function initFetchPatching() {
+  if (typeof window === 'undefined') return;
+  if (
+    typeof window.fetch === 'undefined'
+  ) {
+    return;
+  }
+
+  const restore = wrapFetch(
+    window,
+    window.fetch,
+    TRACING_OPTS,
+  );
+  teardownFns.push(restore);
+}
+
+function initXHRPatching() {
+  if (typeof window === 'undefined') return;
+  if (
+    typeof XMLHttpRequest === 'undefined'
+  ) {
+    return;
+  }
+
+  const restore = wrapXHR(
+    XMLHttpRequest.prototype as any,
+    XMLHttpRequest.prototype.setRequestHeader,
+    TRACING_OPTS,
+  );
+  teardownFns.push(restore);
+}
+
+const patchedIframes = new WeakSet<
+  HTMLIFrameElement
+>();
+
+function patchIframeOnLoad(
+  iframe: HTMLIFrameElement,
+) {
+  if (patchedIframes.has(iframe)) return;
+  patchedIframes.add(iframe);
+
+  const patch = () => {
+    try {
+      const w = iframe.contentWindow;
+      if (!w) return;
+      void w.document;
+
+      if (
+        w.fetch &&
+        !(w.fetch as any).__oodleFetchPatched
+      ) {
+        wrapFetch(
+          w,
+          w.fetch,
+          NO_TRACING_OPTS,
+        );
+        (w.fetch as any)
+          .__oodleFetchPatched = true;
+      }
+
+      const IframeXHR = (w as any)
+        .XMLHttpRequest;
+      if (
+        IframeXHR &&
+        !IframeXHR.prototype
+          .__oodleXHRPatched
+      ) {
+        wrapXHR(
+          IframeXHR.prototype,
+          IframeXHR.prototype
+            .setRequestHeader,
+          NO_TRACING_OPTS,
+        );
+        IframeXHR.prototype
+          .__oodleXHRPatched = true;
+      }
+    } catch {
+      // Cross-origin — silently skip
+    }
+  };
+  patch();
+  iframe.addEventListener('load', patch);
   teardownFns.push(() => {
-    XMLHttpRequest.prototype.open = origOpen;
-    XMLHttpRequest.prototype.send = origSend;
+    iframe.removeEventListener('load', patch);
+  });
+}
+
+function initIframePatching() {
+  if (typeof window === 'undefined') return;
+  if (
+    typeof MutationObserver === 'undefined'
+  ) {
+    return;
+  }
+
+  document
+    .querySelectorAll('iframe')
+    .forEach(patchIframeOnLoad);
+
+  const observer = new MutationObserver(
+    (mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (
+            node instanceof HTMLIFrameElement
+          ) {
+            patchIframeOnLoad(node);
+          }
+          if (
+            node instanceof HTMLElement &&
+            node.childElementCount > 0
+          ) {
+            node
+              .querySelectorAll('iframe')
+              .forEach(patchIframeOnLoad);
+          }
+        }
+      }
+    },
+  );
+
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+
+  teardownFns.push(() => {
+    observer.disconnect();
   });
 }
 

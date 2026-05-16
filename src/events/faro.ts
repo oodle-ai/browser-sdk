@@ -34,6 +34,7 @@ import { incrTelemetry } from '../core/telemetry';
 import {
   getActiveTraceContext,
 } from '../core/otel-bridge';
+import { isReplayActive } from '../replay/recorder';
 
 let teardownFns: Array<() => void> = [];
 
@@ -121,6 +122,9 @@ function baseContext(): Record<string, unknown> {
     session_view_count: counts.viewCount,
     session_error_count: counts.errorCount,
     session_action_count: counts.actionCount,
+    replay_id: isReplayActive()
+      ? getSessionId()
+      : '',
   };
   if (Object.keys(flags).length > 0) {
     ctx.feature_flags = flags;

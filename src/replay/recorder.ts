@@ -420,6 +420,10 @@ export async function initReplay() {
   resetIdleTimers();
 }
 
+export function isReplayActive(): boolean {
+  return stopFn !== null && !recordingDisabled;
+}
+
 export function stopReplay() {
   stopRecording();
   teardownInteractionListeners();

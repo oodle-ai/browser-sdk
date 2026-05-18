@@ -249,6 +249,7 @@ async function send(
       headers,
       body,
       keepalive: byteLen < 63000,
+      credentials: 'omit',
     });
     parseRateLimitHeaders(resp);
     if (
@@ -303,6 +304,7 @@ function sendOnExit(
     headers: hdrs,
     body,
     keepalive: true,
+    credentials: 'omit',
   }).catch(() => {});
 }
 
@@ -379,6 +381,7 @@ async function drainRetryQueue() {
         headers: hdrs,
         body,
         keepalive: byteLen < 63000,
+        credentials: 'omit',
       });
       parseRateLimitHeaders(resp);
       if (
@@ -604,6 +607,7 @@ async function sendRaw(
       headers,
       body,
       keepalive: byteLen < 63000,
+      credentials: 'omit',
     });
     parseRateLimitHeaders(resp);
     if (

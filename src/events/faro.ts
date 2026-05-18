@@ -573,8 +573,11 @@ function headersToRecord(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   if (!h) return out;
-  if (h instanceof Headers) {
-    h.forEach((v, k) => {
+  if (
+    typeof (h as any).forEach === 'function' &&
+    typeof (h as any).get === 'function'
+  ) {
+    (h as Headers).forEach((v, k) => {
       const lk = k.toLowerCase();
       if (!SENSITIVE_HEADERS.has(lk)) {
         out[lk] = v;
@@ -588,10 +591,14 @@ function headersToRecord(
       }
     }
   } else {
-    for (const k of Object.keys(h)) {
+    for (const k of Object.keys(
+      h as Record<string, string>,
+    )) {
       const lk = k.toLowerCase();
       if (!SENSITIVE_HEADERS.has(lk)) {
-        out[lk] = h[k];
+        out[lk] = (
+          h as Record<string, string>
+        )[k];
       }
     }
   }
@@ -692,6 +699,61 @@ interface FetchWrapOpts {
   injectTracing: boolean;
 }
 
+function isRequestLike(
+  input: RequestInfo | URL,
+): input is Request {
+  return (
+    input instanceof Request ||
+    (typeof input === 'object' &&
+      input !== null &&
+      'method' in input &&
+      'body' in input &&
+      'clone' in input &&
+      typeof (input as any).clone ===
+        'function')
+  );
+}
+
+function extractBodySync(
+  init: RequestInit | undefined,
+  input: RequestInfo | URL,
+  maxSize: number,
+): { sync: string; asyncP: Promise<string> | null } {
+  if (init?.body) {
+    if (typeof init.body === 'string') {
+      return {
+        sync: truncateBody(init.body, maxSize),
+        asyncP: null,
+      };
+    }
+    if (
+      typeof URLSearchParams !== 'undefined' &&
+      init.body instanceof URLSearchParams
+    ) {
+      return {
+        sync: truncateBody(
+          init.body.toString(),
+          maxSize,
+        ),
+        asyncP: null,
+      };
+    }
+    return { sync: '', asyncP: null };
+  }
+  if (
+    isRequestLike(input) &&
+    input.body !== null
+  ) {
+    const asyncP = input
+      .clone()
+      .text()
+      .then((t) => truncateBody(t, maxSize))
+      .catch(() => '');
+    return { sync: '', asyncP };
+  }
+  return { sync: '', asyncP: null };
+}
+
 function wrapFetch(
   target: { fetch: typeof fetch },
   origFetch: typeof fetch,
@@ -710,8 +772,10 @@ function wrapFetch(
       ] as any);
     }
 
+    const isReq = isRequestLike(input);
     const method = (
-      init?.method ?? 'GET'
+      init?.method ??
+      (isReq ? input.method : 'GET')
     ).toUpperCase();
     const start = performance.now();
     const decisions =
@@ -740,14 +804,17 @@ function wrapFetch(
     }
 
     let requestBody = '';
-    if (decisions.bodyCfg && init?.body) {
-      if (typeof init.body === 'string') {
-        requestBody = truncateBody(
-          init.body,
-          decisions.bodyCfg.maxBodySize ??
-            65536,
-        );
-      }
+    let reqBodyP: Promise<string> | null = null;
+    if (decisions.bodyCfg) {
+      const maxSize =
+        decisions.bodyCfg.maxBodySize ?? 65536;
+      const extracted = extractBodySync(
+        init,
+        input,
+        maxSize,
+      );
+      requestBody = extracted.sync;
+      reqBodyP = extracted.asyncP;
     }
 
     let reqHdrsJson = '';
@@ -756,9 +823,7 @@ function wrapFetch(
         reqHdrsJson = captureReqHeaders(
           init.headers,
         );
-      } else if (
-        input instanceof Request
-      ) {
+      } else if (isReq) {
         reqHdrsJson = captureResHeaders(
           input.headers,
         );
@@ -778,7 +843,9 @@ function wrapFetch(
             response.headers,
           );
         }
-        const emitBase = () => {
+        const emitBase = (
+          resolvedReqBody: string,
+        ) => {
           const d: Record<
             string,
             unknown
@@ -795,8 +862,8 @@ function wrapFetch(
             d.trace_id = traceId;
             d.span_id = spanId;
           }
-          if (requestBody) {
-            d.request_body = requestBody;
+          if (resolvedReqBody) {
+            d.request_body = resolvedReqBody;
           }
           if (reqHdrsJson) {
             d.request_headers = reqHdrsJson;
@@ -807,28 +874,43 @@ function wrapFetch(
           }
           return d;
         };
+
+        const bodyReady: Promise<string> =
+          reqBodyP
+            ? reqBodyP
+            : Promise.resolve(requestBody);
+
         if (decisions.bodyCfg) {
           const maxSize =
             decisions.bodyCfg.maxBodySize ??
             65536;
-          readBodyLimited(
-            response.clone(),
-            maxSize,
-          )
-            .then((body) => {
+          Promise.all([
+            bodyReady,
+            readBodyLimited(
+              response.clone(),
+              maxSize,
+            ).catch(() => ''),
+          ])
+            .then(([reqB, resB]) => {
               emitEvent(() => {
-                const d = emitBase();
-                if (body) {
-                  d.response_body = body;
+                const d = emitBase(reqB);
+                if (resB) {
+                  d.response_body = resB;
                 }
                 return d;
               });
             })
             .catch(() => {
-              emitEvent(emitBase);
+              bodyReady.then((reqB) => {
+                emitEvent(
+                  () => emitBase(reqB),
+                );
+              });
             });
         } else {
-          emitEvent(emitBase);
+          bodyReady.then((reqB) => {
+            emitEvent(() => emitBase(reqB));
+          });
         }
         return response;
       })
@@ -836,30 +918,37 @@ function wrapFetch(
         const dur = Math.round(
           performance.now() - start,
         );
-        emitEvent(() => {
-          const d: Record<
-            string,
-            unknown
-          > = {
-            event_type: 'resource',
-            resource_url: stripQuery(url),
-            resource_method: method,
-            resource_status: 0,
-            resource_duration_ms: dur,
-            resource_size: 0,
-            resource_type: 'fetch',
-          };
-          if (traceId) {
-            d.trace_id = traceId;
-            d.span_id = spanId;
-          }
-          if (requestBody) {
-            d.request_body = requestBody;
-          }
-          if (reqHdrsJson) {
-            d.request_headers = reqHdrsJson;
-          }
-          return d;
+        const bodyReady: Promise<string> =
+          reqBodyP
+            ? reqBodyP
+            : Promise.resolve(requestBody);
+        bodyReady.then((reqB) => {
+          emitEvent(() => {
+            const d: Record<
+              string,
+              unknown
+            > = {
+              event_type: 'resource',
+              resource_url: stripQuery(url),
+              resource_method: method,
+              resource_status: 0,
+              resource_duration_ms: dur,
+              resource_size: 0,
+              resource_type: 'fetch',
+            };
+            if (traceId) {
+              d.trace_id = traceId;
+              d.span_id = spanId;
+            }
+            if (reqB) {
+              d.request_body = reqB;
+            }
+            if (reqHdrsJson) {
+              d.request_headers =
+                reqHdrsJson;
+            }
+            return d;
+          });
         });
         throw err;
       });
@@ -935,6 +1024,8 @@ function wrapXHR(
       return origSend.apply(this, [body]);
     }
 
+    const xhrMethod =
+      (this as any).__oodleMethod ?? 'GET';
     const decisions =
       resolveUrlDecisions(xhrUrl);
 
@@ -958,15 +1049,23 @@ function wrapXHR(
     }
 
     let requestBody = '';
-    if (
-      decisions.bodyCfg &&
-      body &&
-      typeof body === 'string'
-    ) {
-      requestBody = truncateBody(
-        body,
-        decisions.bodyCfg.maxBodySize ?? 65536,
-      );
+    if (decisions.bodyCfg && body) {
+      const maxSz =
+        decisions.bodyCfg.maxBodySize ?? 65536;
+      if (typeof body === 'string') {
+        requestBody = truncateBody(
+          body,
+          maxSz,
+        );
+      } else if (
+        typeof URLSearchParams !== 'undefined' &&
+        body instanceof URLSearchParams
+      ) {
+        requestBody = truncateBody(
+          body.toString(),
+          maxSz,
+        );
+      }
     }
 
     let reqHdrsJson = '';

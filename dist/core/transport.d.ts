@@ -1,3 +1,4 @@
+export declare const SDK_VERSION: string;
 type Payload = Record<string, unknown>;
 export declare function enqueue(batchKey: string, item: Payload): void;
 export declare function upsert(batchKey: string, key: string, item: Payload): void;

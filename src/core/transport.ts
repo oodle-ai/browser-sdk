@@ -3,6 +3,12 @@ import { getTags } from './tags';
 import { incrTelemetry } from './telemetry';
 import { compressSyncString } from './worker';
 
+declare const __OODLE_RUM_VERSION__: string;
+export const SDK_VERSION: string =
+  typeof __OODLE_RUM_VERSION__ !== 'undefined'
+    ? __OODLE_RUM_VERSION__
+    : 'unknown';
+
 const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
 const MAX_BATCH_SIZE = 50;
 const MAX_BATCH_BYTES = 64_000;
@@ -159,6 +165,7 @@ function buildEnvelope(
   lines.push(
     JSON.stringify({
       session_id: sessionId,
+      sdk_version: SDK_VERSION,
     }),
   );
   for (const section of sections) {

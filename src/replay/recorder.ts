@@ -195,7 +195,7 @@ async function startRecording() {
         input: 'last',
       },
       slimDOMOptions: 'all',
-      checkoutEveryNms: 300_000,
+      checkoutEveryNms: 900_000,
       emit(event: eventWithTime) {
         if (recordingDisabled) return;
 

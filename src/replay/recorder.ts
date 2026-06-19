@@ -23,6 +23,7 @@ const DEFAULT_IDLE_EXPIRE_MS = 900_000;
 let stopFn: (() => void) | null = null;
 let buffer: eventWithTime[] = [];
 let bufferBytesEstimate = 0;
+let replayHasFlushed = false;
 let mutationCount = 0;
 let windowStart = Date.now();
 let consecutiveOverflows = 0;
@@ -130,6 +131,7 @@ function flushReplayBuffer() {
   if (isServerRateLimited('replay')) return;
   const batch = buffer.splice(0);
   bufferBytesEstimate = 0;
+  replayHasFlushed = true;
   const payload = {
     session_id: getSessionId(),
     events: batch,
@@ -424,6 +426,10 @@ export function isReplayActive(): boolean {
   return stopFn !== null && !recordingDisabled;
 }
 
+export function hasReplayFlushed(): boolean {
+  return replayHasFlushed;
+}
+
 export function stopReplay() {
   stopRecording();
   teardownInteractionListeners();
@@ -435,6 +441,7 @@ export function stopReplay() {
   visibilityPaused = false;
   idleExpired = false;
   recordingDisabled = false;
+  replayHasFlushed = false;
   consecutiveOverflows = 0;
   mutationCount = 0;
   replayConfig = null;

@@ -200,7 +200,6 @@ export function initEvents() {
   initPageLoadTracking();
   initFetchPatching();
   initXHRPatching();
-  initIframePatching();
   initLongTaskTracking();
   initViewMetricsVisibility();
 }
@@ -1166,9 +1165,6 @@ function wrapXHR(
 const TRACING_OPTS: FetchWrapOpts = {
   injectTracing: true,
 };
-const NO_TRACING_OPTS: FetchWrapOpts = {
-  injectTracing: false,
-};
 
 function initFetchPatching() {
   if (typeof window === 'undefined') return;
@@ -1200,106 +1196,6 @@ function initXHRPatching() {
     TRACING_OPTS,
   );
   teardownFns.push(restore);
-}
-
-const patchedIframes = new WeakSet<
-  HTMLIFrameElement
->();
-
-function patchIframeOnLoad(
-  iframe: HTMLIFrameElement,
-) {
-  if (patchedIframes.has(iframe)) return;
-  patchedIframes.add(iframe);
-
-  const patch = () => {
-    try {
-      const w = iframe.contentWindow;
-      if (!w) return;
-      void w.document;
-
-      if (
-        w.fetch &&
-        !(w.fetch as any).__oodleFetchPatched
-      ) {
-        wrapFetch(
-          w,
-          w.fetch,
-          NO_TRACING_OPTS,
-        );
-        (w.fetch as any)
-          .__oodleFetchPatched = true;
-      }
-
-      const IframeXHR = (w as any)
-        .XMLHttpRequest;
-      if (
-        IframeXHR &&
-        !IframeXHR.prototype
-          .__oodleXHRPatched
-      ) {
-        wrapXHR(
-          IframeXHR.prototype,
-          IframeXHR.prototype
-            .setRequestHeader,
-          NO_TRACING_OPTS,
-        );
-        IframeXHR.prototype
-          .__oodleXHRPatched = true;
-      }
-    } catch {
-      // Cross-origin — silently skip
-    }
-  };
-  patch();
-  iframe.addEventListener('load', patch);
-  teardownFns.push(() => {
-    iframe.removeEventListener('load', patch);
-  });
-}
-
-function initIframePatching() {
-  if (typeof window === 'undefined') return;
-  if (
-    typeof MutationObserver === 'undefined'
-  ) {
-    return;
-  }
-
-  document
-    .querySelectorAll('iframe')
-    .forEach(patchIframeOnLoad);
-
-  const observer = new MutationObserver(
-    (mutations) => {
-      for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          if (
-            node instanceof HTMLIFrameElement
-          ) {
-            patchIframeOnLoad(node);
-          }
-          if (
-            node instanceof HTMLElement &&
-            node.childElementCount > 0
-          ) {
-            node
-              .querySelectorAll('iframe')
-              .forEach(patchIframeOnLoad);
-          }
-        }
-      }
-    },
-  );
-
-  observer.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-  });
-
-  teardownFns.push(() => {
-    observer.disconnect();
-  });
 }
 
 function initPageLoadTracking() {

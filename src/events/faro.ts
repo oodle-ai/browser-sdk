@@ -763,14 +763,20 @@ function wrapFetch(
   origFetch: typeof fetch,
   opts: FetchWrapOpts,
 ): () => void {
+  // origFetch must always be invoked with `target` as the receiver, never
+  // the caller's ambient `this`. This wrapper lives in the SDK's realm; when
+  // strict-mode code inside a patched same-origin iframe calls a bare
+  // fetch('relative/url'), `this` is undefined and the browser falls back to
+  // the captured function's own realm to resolve relative URLs — which can be
+  // the parent document, misrouting the request (e.g. Grafana-in-iframe
+  // requests resolving against the parent page's path).
   const patched = function (
-    this: any,
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
     const url = extractUrl(input);
     if (isOodleInternalUrl(url)) {
-      return origFetch.apply(this, [
+      return origFetch.apply(target, [
         input,
         init,
       ] as any);
@@ -835,7 +841,7 @@ function wrapFetch(
     }
 
     return origFetch
-      .apply(this, [input, init] as any)
+      .apply(target, [input, init] as any)
       .then((response: Response) => {
         const status = response.status;
         const dur = Math.round(

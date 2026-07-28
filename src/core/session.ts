@@ -11,6 +11,7 @@ interface SessionData {
   actionCount: number;
   sampled: boolean;
   replaySampled: boolean;
+  replaySegmentSeq: number;
 }
 
 function generateId(): string {
@@ -41,6 +42,7 @@ function loadSession(): SessionData | null {
       actionCount: parsed.actionCount ?? 0,
       sampled: parsed.sampled ?? true,
       replaySampled: parsed.replaySampled ?? true,
+      replaySegmentSeq: parsed.replaySegmentSeq ?? 0,
     };
   } catch {
     return null;
@@ -129,6 +131,7 @@ export function getSessionId(): string {
       replaySampled:
         sampled &&
         rollSample(_replaySampleRate),
+      replaySegmentSeq: 0,
     };
     saveSessionImmediate(currentSession);
   } else {
@@ -137,6 +140,25 @@ export function getSessionId(): string {
   }
 
   return currentSession.id;
+}
+
+/**
+ * Segment indices name the stored object server-side,
+ * so they have to be unique for the life of the
+ * session. A page reload keeps the session (it lives in
+ * sessionStorage) but resets module state, so the
+ * counter is persisted with the session rather than
+ * held in the recorder. Written through immediately:
+ * losing an increment to the debounced save would let
+ * the next page load overwrite a stored segment.
+ */
+export function nextReplaySegmentIndex(): number {
+  getSessionId();
+  if (!currentSession) return 0;
+  const index = currentSession.replaySegmentSeq;
+  currentSession.replaySegmentSeq = index + 1;
+  saveSessionImmediate(currentSession);
+  return index;
 }
 
 export function isSessionSampled(): boolean {

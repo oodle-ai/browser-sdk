@@ -9,6 +9,11 @@ interface TelemetryCounters {
   send_failures: number;
   compression_failures: number;
   retry_drops: number;
+  transport_drops: number;
+  exit_send_failures: number;
+  replay_events_dropped: number;
+  replay_rebases: number;
+  replay_overload_pauses: number;
 }
 
 const counters: TelemetryCounters = {
@@ -17,6 +22,11 @@ const counters: TelemetryCounters = {
   send_failures: 0,
   compression_failures: 0,
   retry_drops: 0,
+  transport_drops: 0,
+  exit_send_failures: 0,
+  replay_events_dropped: 0,
+  replay_rebases: 0,
+  replay_overload_pauses: 0,
 };
 
 export function incrTelemetry(

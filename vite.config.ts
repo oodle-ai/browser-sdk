@@ -23,5 +23,14 @@ export default defineConfig({
     },
     sourcemap: false,
   },
-  plugins: [dts({ rollupTypes: true })],
+  plugins: [
+    dts({
+      rollupTypes: true,
+      exclude: ['**/*.test.ts'],
+    }),
+  ],
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.ts'],
+  },
 });

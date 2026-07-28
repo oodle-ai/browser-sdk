@@ -1,4 +1,5 @@
 import { getConfig } from './config';
+import { estimateJsonBytes } from './size';
 import { getTags } from './tags';
 import { incrTelemetry } from './telemetry';
 import { compressSyncString } from './worker';
@@ -13,6 +14,8 @@ const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
 const MAX_BATCH_SIZE = 50;
 const MAX_BATCH_BYTES = 64_000;
 const MAX_MESSAGE_BYTES = 256_000;
+
+const REPLAY_BATCH_KEY = 'replay';
 const MAX_ONGOING_BYTES = 80_000;
 const MAX_ONGOING_REQUESTS = 32;
 const MAX_RETRY_QUEUE_BYTES = 20_000_000;
@@ -20,6 +23,17 @@ const MAX_RETRY_ATTEMPTS = 5;
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 const DEBOUNCE_EXTRA_MS = 500;
+
+/**
+ * Browsers reject a `keepalive` fetch whose body is
+ * over 64KB, and the rejection surfaces as a thrown
+ * TypeError, so setting keepalive unconditionally on
+ * the exit path turns a large payload into a silent
+ * total loss. Held a little under the spec limit
+ * because the comparison is against string length,
+ * which undercounts multi-byte characters.
+ */
+const KEEPALIVE_MAX_BYTES = 63_000;
 
 type Payload = Record<string, unknown>;
 
@@ -45,6 +59,7 @@ interface RetryItem {
   body: string;
   bytes: number;
   attempts: number;
+  batchKey?: string;
 }
 
 let retryQueue: RetryItem[] = [];
@@ -101,29 +116,63 @@ function compressBatchSync(
   return { body: raw, encoding: '' };
 }
 
-function estimateBytes(item: Payload): number {
-  let estimate = 2;
-  for (const key in item) {
-    if (
-      !Object.prototype.hasOwnProperty.call(
+/**
+ * Measuring costs time proportional to how far the
+ * estimator gets before its limit stops it, so ask for
+ * the smallest answer the caller can act on.
+ *
+ * Replay only needs the batching threshold: a segment
+ * is never rejected for being large, because a full
+ * snapshot cannot be split and the recorder already
+ * bounds segment size. Stopping at MAX_BATCH_BYTES
+ * keeps the walk to a few hundred nodes instead of
+ * every node of a multi-megabyte snapshot.
+ */
+function measure(
+  batchKey: string,
+  item: Payload,
+): { bytes: number; oversized: boolean } {
+  if (batchKey === REPLAY_BATCH_KEY) {
+    return {
+      bytes: estimateJsonBytes(
         item,
-        key,
-      )
-    )
-      continue;
-    estimate += key.length + 4;
-    const val = item[key];
-    if (typeof val === 'string') {
-      estimate += val.length + 2;
-    } else if (typeof val === 'number') {
-      estimate += 8;
-    } else if (typeof val === 'boolean') {
-      estimate += 5;
-    } else {
-      estimate += 50;
-    }
+        MAX_BATCH_BYTES + 1,
+      ),
+      oversized: false,
+    };
   }
-  return estimate;
+  const bytes = estimateJsonBytes(
+    item,
+    MAX_MESSAGE_BYTES + 1,
+  );
+  return {
+    bytes,
+    oversized: bytes > MAX_MESSAGE_BYTES,
+  };
+}
+
+let replayDropHandler: (() => void) | null = null;
+
+/**
+ * Lets the replay recorder re-base its stream when the
+ * transport has to throw a segment away. rrweb events
+ * are deltas, so a dropped segment invalidates every
+ * later event until a new full snapshot is taken.
+ */
+export function setReplayDropHandler(
+  cb: () => void,
+) {
+  replayDropHandler = cb;
+}
+
+function onDropped(batchKey: string) {
+  incrTelemetry('transport_drops');
+  if (
+    batchKey === REPLAY_BATCH_KEY &&
+    replayDropHandler
+  ) {
+    replayDropHandler();
+  }
 }
 
 const SHOULD_SEND_QUEUE_MAX = 1000;
@@ -237,7 +286,7 @@ async function send(
     ongoingBytes >= MAX_ONGOING_BYTES ||
     ongoingRequests >= MAX_ONGOING_REQUESTS
   ) {
-    enqueueRetry(url, headers, raw);
+    enqueueRetry(url, headers, raw, batchKey);
     return;
   }
 
@@ -248,14 +297,16 @@ async function send(
   try {
     const { body, encoding } =
       compressBatchSync(raw);
+    const hdrs = { ...headers };
     if (encoding) {
-      headers['Content-Encoding'] = encoding;
+      hdrs['Content-Encoding'] = encoding;
     }
     const resp = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: hdrs,
       body,
-      keepalive: byteLen < 63000,
+      keepalive:
+        byteLen < KEEPALIVE_MAX_BYTES,
       credentials: 'omit',
     });
     parseRateLimitHeaders(resp);
@@ -263,11 +314,11 @@ async function send(
       resp.status === 429 ||
       resp.status >= 500
     ) {
-      enqueueRetry(url, headers, raw);
+      enqueueRetry(url, headers, raw, batchKey);
     }
   } catch {
     incrTelemetry('send_failures');
-    enqueueRetry(url, headers, raw);
+    enqueueRetry(url, headers, raw, batchKey);
   } finally {
     ongoingBytes -= byteLen;
     ongoingRequests--;
@@ -285,6 +336,9 @@ function sendOnExit(
     typeof navigator !== 'undefined' &&
     navigator.sendBeacon
   ) {
+    // The receiver reads the instance from the API key
+    // and only honours Content-Encoding from a real
+    // header, so the beacon body stays uncompressed.
     const beaconUrl =
       url +
       `?api_key=${encodeURIComponent(
@@ -300,25 +354,39 @@ function sendOnExit(
       return;
     }
   }
+
   const { body, encoding } =
     compressBatchSync(raw);
   const hdrs = { ...headers };
   if (encoding) {
     hdrs['Content-Encoding'] = encoding;
+  } else {
+    delete hdrs['Content-Encoding'];
   }
+
+  const bodyBytes =
+    body instanceof Blob ? body.size : raw.length;
+
+  // Over the keepalive ceiling the request would be
+  // rejected outright. A plain fetch still completes
+  // for the common "tab hidden" case, which is most of
+  // what reaches this path.
   fetch(url, {
     method: 'POST',
     headers: hdrs,
     body,
-    keepalive: true,
+    keepalive: bodyBytes < KEEPALIVE_MAX_BYTES,
     credentials: 'omit',
-  }).catch(() => {});
+  }).catch(() => {
+    incrTelemetry('exit_send_failures');
+  });
 }
 
 function enqueueRetry(
   url: string,
   headers: Record<string, string>,
   body: string,
+  batchKey?: string,
 ) {
   const bytes = body.length;
   if (
@@ -326,14 +394,23 @@ function enqueueRetry(
     MAX_RETRY_QUEUE_BYTES
   ) {
     incrTelemetry('retry_drops');
+    if (batchKey) onDropped(batchKey);
     return;
   }
+  // `body` is always the uncompressed envelope; the
+  // caller may have stamped Content-Encoding on its
+  // headers before compressing. Carrying that stale
+  // header forward makes the server try to gunzip
+  // plain text if the retry fails to compress.
+  const clean = { ...headers };
+  delete clean['Content-Encoding'];
   retryQueue.push({
     url,
-    headers,
+    headers: clean,
     body,
     bytes,
     attempts: 0,
+    batchKey,
   });
   retryQueueBytes += bytes;
   scheduleRetry();
@@ -367,6 +444,9 @@ async function drainRetryQueue() {
 
     if (item.attempts > MAX_RETRY_ATTEMPTS) {
       incrTelemetry('retry_drops');
+      if (item.batchKey) {
+        onDropped(item.batchKey);
+      }
       continue;
     }
 
@@ -382,12 +462,15 @@ async function drainRetryQueue() {
         'application/json';
       if (encoding) {
         hdrs['Content-Encoding'] = encoding;
+      } else {
+        delete hdrs['Content-Encoding'];
       }
       const resp = await fetch(item.url, {
         method: 'POST',
         headers: hdrs,
         body,
-        keepalive: byteLen < 63000,
+        keepalive:
+          byteLen < KEEPALIVE_MAX_BYTES,
         credentials: 'omit',
       });
       parseRateLimitHeaders(resp);
@@ -395,12 +478,15 @@ async function drainRetryQueue() {
         resp.status === 429 ||
         resp.status >= 500
       ) {
-        retryQueue.push(item);
+        // Front of the queue: replay segments must
+        // reach the server in the order they were
+        // recorded.
+        retryQueue.unshift(item);
         retryQueueBytes += item.bytes;
         break;
       }
     } catch {
-      retryQueue.push(item);
+      retryQueue.unshift(item);
       retryQueueBytes += item.bytes;
       break;
     } finally {
@@ -461,12 +547,16 @@ export function enqueue(
   batchKey: string,
   item: Payload,
 ) {
-  const bytes = estimateBytes(item);
-  if (bytes > MAX_MESSAGE_BYTES) {
+  const { bytes, oversized } = measure(
+    batchKey,
+    item,
+  );
+  if (oversized) {
     console.warn(
       '[@oodle-ai/rum] Dropping oversized' +
-        ` event (${bytes} bytes)`,
+        ` ${batchKey} payload (${bytes} bytes)`,
     );
+    onDropped(batchKey);
     return;
   }
 
@@ -490,16 +580,23 @@ export function upsert(
   key: string,
   item: Payload,
 ) {
-  const bytes = estimateBytes(item);
-  if (bytes > MAX_MESSAGE_BYTES) return;
+  const { bytes, oversized } = measure(
+    batchKey,
+    item,
+  );
+  if (oversized) {
+    onDropped(batchKey);
+    return;
+  }
 
   const q = getQueue(batchKey);
   const existingIdx = q.upsertMap.get(key);
 
   if (existingIdx !== undefined) {
-    const oldBytes = estimateBytes(
+    const oldBytes = measure(
+      batchKey,
       q.items[existingIdx],
-    );
+    ).bytes;
     q.items[existingIdx] = item;
     q.bytesEstimate += bytes - oldBytes;
   } else {
@@ -577,18 +674,30 @@ export function flushAll(isExit = false) {
     'Content-Type': 'application/json',
   };
 
+  const carriesReplay = sections.some(
+    (s) => s.type === REPLAY_BATCH_KEY,
+  );
+
   if (isExit) {
     sendOnExit(url, headers, raw);
     return;
   }
 
-  sendRaw(url, headers, raw);
+  sendRaw(
+    url,
+    headers,
+    raw,
+    carriesReplay
+      ? REPLAY_BATCH_KEY
+      : undefined,
+  );
 }
 
 async function sendRaw(
   url: string,
   headers: Record<string, string>,
   raw: string,
+  batchKey?: string,
 ) {
   const byteLen = raw.length;
 
@@ -596,7 +705,7 @@ async function sendRaw(
     ongoingBytes >= MAX_ONGOING_BYTES ||
     ongoingRequests >= MAX_ONGOING_REQUESTS
   ) {
-    enqueueRetry(url, headers, raw);
+    enqueueRetry(url, headers, raw, batchKey);
     return;
   }
 
@@ -606,14 +715,16 @@ async function sendRaw(
   try {
     const { body, encoding } =
       compressBatchSync(raw);
+    const hdrs = { ...headers };
     if (encoding) {
-      headers['Content-Encoding'] = encoding;
+      hdrs['Content-Encoding'] = encoding;
     }
     const resp = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: hdrs,
       body,
-      keepalive: byteLen < 63000,
+      keepalive:
+        byteLen < KEEPALIVE_MAX_BYTES,
       credentials: 'omit',
     });
     parseRateLimitHeaders(resp);
@@ -621,11 +732,11 @@ async function sendRaw(
       resp.status === 429 ||
       resp.status >= 500
     ) {
-      enqueueRetry(url, headers, raw);
+      enqueueRetry(url, headers, raw, batchKey);
     }
   } catch {
     incrTelemetry('send_failures');
-    enqueueRetry(url, headers, raw);
+    enqueueRetry(url, headers, raw, batchKey);
   } finally {
     ongoingBytes -= byteLen;
     ongoingRequests--;

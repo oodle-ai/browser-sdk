@@ -12,7 +12,7 @@ export const SDK_VERSION: string =
 
 const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
 const MAX_BATCH_SIZE = 50;
-const MAX_BATCH_BYTES = 64_000;
+const MAX_BATCH_BYTES = 500_000;
 const MAX_MESSAGE_BYTES = 256_000;
 
 const REPLAY_BATCH_KEY = 'replay';
@@ -42,12 +42,6 @@ interface QueueEntry {
   items: Payload[];
   upsertMap: Map<string, number>;
   bytesEstimate: number;
-  debounceTimer: ReturnType<
-    typeof setTimeout
-  > | null;
-  maxWaitTimer: ReturnType<
-    typeof setTimeout
-  > | null;
 }
 
 let ongoingBytes = 0;
@@ -70,6 +64,13 @@ let retryTimer: ReturnType<
 
 const queues = new Map<string, QueueEntry>();
 
+let globalDebounceTimer: ReturnType<
+  typeof setTimeout
+> | null = null;
+let globalMaxWaitTimer: ReturnType<
+  typeof setTimeout
+> | null = null;
+
 function getFlushInterval(): number {
   try {
     return (
@@ -91,8 +92,6 @@ function getQueue(
       items: [],
       upsertMap: new Map(),
       bytesEstimate: 0,
-      debounceTimer: null,
-      maxWaitTimer: null,
     };
     queues.set(batchKey, q);
   }
@@ -124,10 +123,11 @@ function compressBatchSync(
  * Replay only needs the batching threshold: a segment
  * is never rejected for being large, because a full
  * snapshot cannot be split and the recorder already
- * bounds segment size. Stopping at MAX_BATCH_BYTES
- * keeps the walk to a few hundred nodes instead of
- * every node of a multi-megabyte snapshot.
+ * bounds segment size. The replay ceiling is kept low
+ * so the walk stays cheap on multi-megabyte snapshots.
  */
+const REPLAY_MEASURE_LIMIT = 64_000;
+
 function measure(
   batchKey: string,
   item: Payload,
@@ -136,7 +136,7 @@ function measure(
     return {
       bytes: estimateJsonBytes(
         item,
-        MAX_BATCH_BYTES + 1,
+        REPLAY_MEASURE_LIMIT,
       ),
       oversized: false,
     };
@@ -348,7 +348,7 @@ function sendOnExit(
       type: 'application/json',
     });
     if (
-      blob.size < MAX_BATCH_BYTES &&
+      blob.size < KEEPALIVE_MAX_BYTES &&
       navigator.sendBeacon(beaconUrl, blob)
     ) {
       return;
@@ -499,44 +499,31 @@ async function drainRetryQueue() {
   }
 }
 
-function clearQueueTimers(q: QueueEntry) {
-  if (q.debounceTimer) {
-    clearTimeout(q.debounceTimer);
-    q.debounceTimer = null;
+function clearGlobalTimers() {
+  if (globalDebounceTimer) {
+    clearTimeout(globalDebounceTimer);
+    globalDebounceTimer = null;
   }
-  if (q.maxWaitTimer) {
-    clearTimeout(q.maxWaitTimer);
-    q.maxWaitTimer = null;
+  if (globalMaxWaitTimer) {
+    clearTimeout(globalMaxWaitTimer);
+    globalMaxWaitTimer = null;
   }
 }
 
-function flush(
-  batchKey: string,
-  isExit = false,
-) {
-  const q = queues.get(batchKey);
-  if (!q || q.items.length === 0) return;
-  const batch = q.items.splice(0);
-  q.upsertMap.clear();
-  q.bytesEstimate = 0;
-  clearQueueTimers(q);
-  send(q.batchKey, batch, isExit);
-}
-
-function scheduleDebounce(q: QueueEntry) {
+function scheduleGlobalDebounce() {
   const interval = getFlushInterval();
-  if (q.debounceTimer) {
-    clearTimeout(q.debounceTimer);
+  if (globalDebounceTimer) {
+    clearTimeout(globalDebounceTimer);
   }
-  q.debounceTimer = setTimeout(
-    () => flush(q.batchKey),
+  globalDebounceTimer = setTimeout(
+    () => flushAll(),
     interval,
   );
-  if (!q.maxWaitTimer) {
-    q.maxWaitTimer = setTimeout(
+  if (!globalMaxWaitTimer) {
+    globalMaxWaitTimer = setTimeout(
       () => {
-        q.maxWaitTimer = null;
-        flush(q.batchKey);
+        globalMaxWaitTimer = null;
+        flushAll();
       },
       interval + DEBOUNCE_EXTRA_MS,
     );
@@ -568,11 +555,11 @@ export function enqueue(
     q.items.length >= MAX_BATCH_SIZE ||
     q.bytesEstimate >= MAX_BATCH_BYTES
   ) {
-    flush(q.batchKey);
+    flushAll();
     return;
   }
 
-  scheduleDebounce(q);
+  scheduleGlobalDebounce();
 }
 
 export function upsert(
@@ -610,11 +597,11 @@ export function upsert(
     q.items.length >= MAX_BATCH_SIZE ||
     q.bytesEstimate >= MAX_BATCH_BYTES
   ) {
-    flush(q.batchKey);
+    flushAll();
     return;
   }
 
-  scheduleDebounce(q);
+  scheduleGlobalDebounce();
 }
 
 const FLUSH_PRIORITY = ['events', 'replay'];
@@ -627,9 +614,11 @@ export function flushAll(isExit = false) {
     config.shouldSendData &&
     !config.shouldSendData()
   ) {
+    scheduleGlobalDebounce();
     return;
   }
 
+  clearGlobalTimers();
   const tags = getTags();
   const sections: {
     type: string;
@@ -652,7 +641,6 @@ export function flushAll(isExit = false) {
     const batch = q.items.splice(0);
     q.upsertMap.clear();
     q.bytesEstimate = 0;
-    clearQueueTimers(q);
     const enriched = batch.map((item) => ({
       ...item,
       tags,

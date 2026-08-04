@@ -14,6 +14,9 @@ interface TelemetryCounters {
   replay_events_dropped: number;
   replay_rebases: number;
   replay_overload_pauses: number;
+  replay_expensive_snapshots: number;
+  replay_attributes_throttled: number;
+  replay_emit_errors: number;
 }
 
 const counters: TelemetryCounters = {
@@ -27,6 +30,9 @@ const counters: TelemetryCounters = {
   replay_events_dropped: 0,
   replay_rebases: 0,
   replay_overload_pauses: 0,
+  replay_expensive_snapshots: 0,
+  replay_attributes_throttled: 0,
+  replay_emit_errors: 0,
 };
 
 export function incrTelemetry(

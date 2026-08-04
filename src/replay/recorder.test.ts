@@ -13,6 +13,14 @@ const INCREMENTAL_SNAPSHOT = 3;
 const META = 4;
 
 /**
+ * Comfortably past the recorder's per-window mutation
+ * ceiling, so a burst of this size always reaches the
+ * drop-and-re-base path. Kept in one place because the
+ * ceiling itself is tuned.
+ */
+const OVER_CEILING = 3_200;
+
+/**
  * Captures the `emit` callback rrweb would be given so
  * a test can push synthetic events through the real
  * recorder pipeline.
@@ -21,15 +29,23 @@ let emit: (e: eventWithTime) => void = () => {};
 let takeFullSnapshot: any;
 let recordCalls = 0;
 
+/** Options rrweb was configured with, for assertions. */
+let recordOpts: any = {};
+
 vi.mock('rrweb', () => ({
   get record() {
     const fn: any = (opts: any) => {
       recordCalls++;
+      recordOpts = opts;
       emit = opts.emit;
       return () => {};
     };
     fn.takeFullSnapshot = (...args: any[]) =>
       takeFullSnapshot(...args);
+    fn.mirror = {
+      getNode: () => null,
+      getId: () => -1,
+    };
     return fn;
   },
 }));
@@ -38,8 +54,11 @@ const enqueued: any[] = [];
 let rateLimited = false;
 
 vi.mock('../core/transport', () => ({
-  enqueue: (key: string, payload: any) =>
-    enqueued.push({ key, payload }),
+  enqueue: (
+    key: string,
+    payload: any,
+    bytesHint?: number,
+  ) => enqueued.push({ key, payload, bytesHint }),
   isServerRateLimited: () => rateLimited,
   setReplayDropHandler: () => {},
 }));
@@ -53,9 +72,12 @@ let sessionSeq = 0;
 
 let sessionId = 'session-1';
 
+let replaySampled = true;
+
 vi.mock('../core/session', () => ({
   getSessionId: () => sessionId,
   nextReplaySegmentIndex: () => sessionSeq++,
+  isReplaySampled: () => replaySampled,
 }));
 
 vi.mock('../core/config', () => ({
@@ -105,6 +127,7 @@ describe('replay recorder', () => {
     recordCalls = 0;
     sessionSeq = 0;
     sessionId = 'session-1';
+    replaySampled = true;
     takeFullSnapshot = vi.fn(() =>
       emit(fullSnapshot(Date.now())),
     );
@@ -160,8 +183,8 @@ describe('replay recorder', () => {
   });
 
   it('never emits an incremental event after a drop without a full snapshot first', () => {
-    // Blow through the 750-per-5s budget.
-    for (let i = 0; i < 900; i++) {
+    // Blow through the per-window budget.
+    for (let i = 0; i < OVER_CEILING; i++) {
       emit(incremental(Date.now()));
     }
     vi.advanceTimersByTime(30_000);
@@ -190,7 +213,7 @@ describe('replay recorder', () => {
   it('drops incremental events while waiting for the re-base snapshot', () => {
     takeFullSnapshot = vi.fn();
 
-    for (let i = 0; i < 900; i++) {
+    for (let i = 0; i < OVER_CEILING; i++) {
       emit(incremental(Date.now()));
     }
     // Let the events accepted before the overflow
@@ -211,7 +234,7 @@ describe('replay recorder', () => {
 
   it('accepts incremental events again once the snapshot arrives', () => {
     takeFullSnapshot = vi.fn();
-    for (let i = 0; i < 900; i++) {
+    for (let i = 0; i < OVER_CEILING; i++) {
       emit(incremental(Date.now()));
     }
     vi.advanceTimersByTime(10_000);
@@ -284,7 +307,7 @@ describe('replay recorder', () => {
     // a full snapshot every few seconds forever.
     let now = Date.now();
     for (let round = 0; round < 20; round++) {
-      for (let i = 0; i < 900; i++) {
+      for (let i = 0; i < OVER_CEILING; i++) {
         emit(incremental(now));
       }
       now += 6000;
@@ -377,5 +400,231 @@ describe('replay recorder', () => {
 
     emit(big);
     expect(enqueued.length).toBe(1);
+  });
+
+  it('tells the transport how big a segment is so it is not measured twice', () => {
+    emit(fullSnapshot(Date.now()));
+    vi.advanceTimersByTime(10_000);
+
+    expect(enqueued.length).toBeGreaterThan(0);
+    // Third argument to enqueue: the recorder already
+    // walked every event on the way in, so re-walking
+    // the segment in the transport is pure overhead.
+    expect(
+      typeof enqueued[0].bytesHint,
+    ).toBe('number');
+    expect(
+      enqueued[0].bytesHint,
+    ).toBeGreaterThan(0);
+  });
+
+  it('drains a batch bigger than one time slice without losing or reordering events', () => {
+    // The drain is budgeted, so a batch this size spans
+    // several slices. Ordering is what makes the stream
+    // replayable, so it has to survive the hand-off.
+    const sent: eventWithTime[] = [];
+    emit(fullSnapshot(1000));
+    sent.push(fullSnapshot(1000));
+
+    let ts = 1000;
+    for (let i = 0; i < 700; i++) {
+      ts += 1;
+      vi.setSystemTime(ts);
+      const e = incremental(ts);
+      emit(e);
+      sent.push(e);
+    }
+    vi.advanceTimersByTime(60_000);
+
+    const got = flushedEvents();
+    expect(got.length).toBe(sent.length);
+    expect(got.map((e) => e.timestamp)).toEqual(
+      sent.map((e) => e.timestamp),
+    );
+  });
+
+  it('buffers a full snapshot only after the mutations it replaces', () => {
+    // A budgeted drain may leave mutations queued. The
+    // snapshot describes the DOM that replaces them, so
+    // emitting it first would corrupt the stream.
+    let ts = 1000;
+    for (let i = 0; i < 200; i++) {
+      ts += 1;
+      vi.setSystemTime(ts);
+      emit(incremental(ts));
+    }
+    ts += 1;
+    vi.setSystemTime(ts);
+    emit(fullSnapshot(ts));
+    vi.advanceTimersByTime(60_000);
+
+    const events = flushedEvents();
+    const snapIdx = events.findIndex(
+      (e) => e.type === FULL_SNAPSHOT,
+    );
+    expect(snapIdx).toBe(events.length - 1);
+    expect(
+      events
+        .slice(0, snapIdx)
+        .every(
+          (e) =>
+            e.type === INCREMENTAL_SNAPSHOT,
+        ),
+    ).toBe(true);
+  });
+
+  it('stops re-basing after one attempt when the snapshot itself is expensive', () => {
+    // Re-serializing a DOM this large costs the page
+    // more than the recovered recording is worth, so the
+    // usual three-strike allowance must not apply.
+    takeFullSnapshot = vi.fn(() => {
+      vi.advanceTimersByTime(400);
+      emit(fullSnapshot(Date.now()));
+    });
+
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 0; i < OVER_CEILING; i++) {
+        emit(incremental(Date.now()));
+      }
+      vi.advanceTimersByTime(10_000);
+    }
+
+    expect(
+      takeFullSnapshot.mock.calls.length,
+    ).toBeLessThanOrEqual(2);
+  });
+
+  it('never lets an exception escape back into rrweb', () => {
+    // rrweb invokes emit between lock() and unlock() of
+    // its mutation buffers with no try/finally. An escape
+    // leaves the buffer locked, and every later DOM
+    // mutation is silently discarded for the life of the
+    // page while mouse and scroll keep recording, so the
+    // session looks healthy and replays frozen.
+    rateLimited = false;
+    const boom = {
+      type: META,
+      get data(): unknown {
+        throw new Error('serialization blew up');
+      },
+      timestamp: Date.now(),
+    } as unknown as eventWithTime;
+
+    expect(() => emit(boom)).not.toThrow();
+
+    // Recording must still work afterwards.
+    emit(fullSnapshot(Date.now()));
+    vi.advanceTimersByTime(10_000);
+    expect(flushedEvents().length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('resumes recording when the user comes back long after the replay expired', async () => {
+    // A tab left open overnight blows past the idle
+    // expiry. Leaving replay off for the rest of the page
+    // means everything the user does on their return is
+    // unrecorded, which is the whole session for them.
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    const callsWhileAway = recordCalls;
+
+    window.dispatchEvent(new Event('click'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(recordCalls).toBeGreaterThan(callsWhileAway);
+    expect(recorder.isReplayActive()).toBe(true);
+  });
+
+  it('stays off after expiry when the new session is not replay sampled', async () => {
+    replaySampled = false;
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    const callsWhileAway = recordCalls;
+
+    window.dispatchEvent(new Event('click'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Sampling decided this session is not recorded;
+    // resuming would record a session the server will
+    // reject.
+    expect(recordCalls).toBe(callsWhileAway);
+  });
+
+  it('flushes on tab hide without restarting rrweb', async () => {
+    // Every record() call begins with a full snapshot, so
+    // restarting here re-serialized the whole DOM on
+    // return. Tab switching is frequent and the snapshot
+    // is the most expensive thing the recorder does.
+    emit(incremental(Date.now()));
+    const startsBefore = recordCalls;
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    // Buffered events must not be stranded in a tab the
+    // user may never come back to.
+    expect(enqueued.length).toBeGreaterThan(0);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    // startRecording awaits a dynamic import, so a
+    // restart would land a microtask later. Drain the
+    // queue before asserting it did not happen.
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(recordCalls).toBe(startsBefore);
+    expect(takeFullSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('gives rrweb an error handler so its own observers cannot tear recording down', () => {
+    expect(typeof recordOpts.errorHandler).toBe(
+      'function',
+    );
+    expect(recordOpts.errorHandler()).toBe(true);
+  });
+
+  it('keeps structural mutations while shedding attribute churn on one node', () => {
+    // Throttling must never cost a re-snapshot, so it
+    // may only ever remove attribute entries.
+    for (let i = 0; i < 400; i++) {
+      emit({
+        type: INCREMENTAL_SNAPSHOT,
+        data: {
+          source: 0,
+          attributes: [
+            { id: 5, attributes: { style: 'a' } },
+          ],
+          adds: [
+            {
+              parentId: 1,
+              node: { id: 900 + i },
+            },
+          ],
+        },
+        timestamp: Date.now(),
+      } as unknown as eventWithTime);
+    }
+    vi.advanceTimersByTime(30_000);
+
+    const events = flushedEvents();
+    const totalAdds = events.reduce(
+      (n, e) =>
+        n +
+        (((e as any).data?.adds?.length as
+          | number
+          | undefined) ?? 0),
+      0,
+    );
+    // Every add survives; no re-base was needed.
+    expect(totalAdds).toBe(400);
+    expect(takeFullSnapshot).not.toHaveBeenCalled();
   });
 });

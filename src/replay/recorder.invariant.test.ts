@@ -248,8 +248,9 @@ describe('replay recorder invariants', () => {
             emitIncremental();
           }
         } else if (roll < 0.7) {
-          // Burst past the 750-per-5s budget.
-          const n = 700 + Math.floor(rnd() * 400);
+          // Burst past the per-window mutation ceiling,
+          // so the drop-and-re-base path stays covered.
+          const n = 2_900 + Math.floor(rnd() * 800);
           for (let i = 0; i < n; i++) {
             emitIncremental();
           }

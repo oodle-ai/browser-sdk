@@ -7,7 +7,7 @@ type Payload = Record<string, unknown>;
  * later event until a new full snapshot is taken.
  */
 export declare function setReplayDropHandler(cb: () => void): void;
-export declare function enqueue(batchKey: string, item: Payload): void;
+export declare function enqueue(batchKey: string, item: Payload, bytesHint?: number): void;
 export declare function upsert(batchKey: string, key: string, item: Payload): void;
 export declare function flushAll(isExit?: boolean): void;
 export declare function isServerRateLimited(category: string): boolean;

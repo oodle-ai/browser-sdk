@@ -53,6 +53,13 @@ vi.mock('rrweb', () => ({
 const enqueued: any[] = [];
 let rateLimited = false;
 
+/**
+ * The recorder hands its buffer over through this rather
+ * than from its own listener, so the tests drive it the
+ * way the transport does.
+ */
+let exitFlushHook: (() => void) | null = null;
+
 vi.mock('../core/transport', () => ({
   enqueue: (
     key: string,
@@ -61,6 +68,9 @@ vi.mock('../core/transport', () => ({
   ) => enqueued.push({ key, payload, bytesHint }),
   isServerRateLimited: () => rateLimited,
   setReplayDropHandler: () => {},
+  setExitFlushHook: (fn: (() => void) | null) => {
+    exitFlushHook = fn;
+  },
 }));
 
 /**
@@ -418,6 +428,45 @@ describe('replay recorder', () => {
     ).toBeGreaterThan(0);
   });
 
+  it('sizes a wide snapshot at its real size, not the segment threshold', () => {
+    // Stopping the measurement at the segment threshold
+    // is enough to decide when to flush, but it scores
+    // every snapshot bigger than that as the threshold
+    // itself. The pending ceiling is counted in these
+    // units and is only ever reached while the server
+    // rate limits us, which is exactly when megabyte
+    // snapshots pile up, so a clamped figure lets the
+    // buffer grow many times past its stated bound.
+    //
+    // A snapshot is wide rather than deep: thousands of
+    // small nodes, each too small to overshoot the
+    // threshold on its own. That is the shape a capped
+    // walk truncates.
+    const nodes = Array.from(
+      { length: 20_000 },
+      (_, id) => ({
+        id,
+        tagName: 'div',
+        attributes: { class: 'row' },
+      }),
+    );
+    const wide = {
+      type: FULL_SNAPSHOT,
+      data: {
+        node: { id: 1, childNodes: nodes },
+        initialOffset: {},
+      },
+      timestamp: Date.now(),
+    } as unknown as eventWithTime;
+
+    emit(wide);
+
+    expect(enqueued.length).toBe(1);
+    expect(
+      enqueued[0].bytesHint,
+    ).toBeGreaterThan(500_000);
+  });
+
   it('drains a batch bigger than one time slice without losing or reordering events', () => {
     // The drain is budgeted, so a batch this size spans
     // several slices. Ordering is what makes the stream
@@ -550,7 +599,7 @@ describe('replay recorder', () => {
     expect(recordCalls).toBe(callsWhileAway);
   });
 
-  it('flushes on tab hide without restarting rrweb', async () => {
+  it('hands the open segment over on page exit without restarting rrweb', async () => {
     // Every record() call begins with a full snapshot, so
     // restarting here re-serialized the whole DOM on
     // return. Tab switching is frequent and the snapshot
@@ -558,21 +607,12 @@ describe('replay recorder', () => {
     emit(incremental(Date.now()));
     const startsBefore = recordCalls;
 
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'hidden',
-    });
-    document.dispatchEvent(new Event('visibilitychange'));
+    expect(exitFlushHook).toBeTypeOf('function');
+    exitFlushHook!();
 
     // Buffered events must not be stranded in a tab the
     // user may never come back to.
     expect(enqueued.length).toBeGreaterThan(0);
-
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'visible',
-    });
-    document.dispatchEvent(new Event('visibilitychange'));
 
     // startRecording awaits a dynamic import, so a
     // restart would land a microtask later. Drain the

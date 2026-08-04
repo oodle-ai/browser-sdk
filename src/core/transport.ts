@@ -74,6 +74,9 @@ let globalMaxWaitTimer: ReturnType<
   typeof setTimeout
 > | null = null;
 
+let exitFlushHook: (() => void) | null = null;
+let inExitFlush = false;
+
 function getFlushInterval(): number {
   try {
     return (
@@ -584,9 +587,15 @@ export function enqueue(
   q.items.push(item);
   q.bytesEstimate += bytes;
 
+  // Draining a producer on the exit path can cross the
+  // threshold, and a nested flush there would send the
+  // batch the ordinary way: no beacon, no keepalive, on
+  // a document that is going away. The exit flush this
+  // is nested inside sends it properly a moment later.
   if (
-    q.items.length >= MAX_BATCH_SIZE ||
-    q.bytesEstimate >= MAX_BATCH_BYTES
+    !inExitFlush &&
+    (q.items.length >= MAX_BATCH_SIZE ||
+      q.bytesEstimate >= MAX_BATCH_BYTES)
   ) {
     flushAll();
     return;
@@ -627,8 +636,9 @@ export function upsert(
   }
 
   if (
-    q.items.length >= MAX_BATCH_SIZE ||
-    q.bytesEstimate >= MAX_BATCH_BYTES
+    !inExitFlush &&
+    (q.items.length >= MAX_BATCH_SIZE ||
+      q.bytesEstimate >= MAX_BATCH_BYTES)
   ) {
     flushAll();
     return;
@@ -637,10 +647,41 @@ export function upsert(
   scheduleGlobalDebounce();
 }
 
+/**
+ * Registers a producer that keeps its own buffer, so an
+ * exit flush can collect from it before building the
+ * envelope.
+ *
+ * A producer cannot do this from its own
+ * `visibilitychange` listener. Listeners run in
+ * registration order and the transport registers first,
+ * so anything handed over from a later listener lands in
+ * the queue after the exit flush has already run, and
+ * then waits on the debounce while the page goes away.
+ * `pagehide` has no second listener at all.
+ */
+export function setExitFlushHook(
+  fn: (() => void) | null,
+) {
+  exitFlushHook = fn;
+}
+
 const FLUSH_PRIORITY = ['events', 'replay'];
 
 export function flushAll(isExit = false) {
   const config = getConfig();
+
+  if (isExit && exitFlushHook && !inExitFlush) {
+    inExitFlush = true;
+    try {
+      exitFlushHook();
+    } catch {
+      // A producer that throws must not cost us the
+      // batches that are already queued.
+    } finally {
+      inExitFlush = false;
+    }
+  }
 
   if (
     !isExit &&

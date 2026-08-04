@@ -11,6 +11,7 @@ import { createMutationThrottler } from './mutation-throttle';
 import {
   enqueue,
   isServerRateLimited,
+  setExitFlushHook,
   setReplayDropHandler,
 } from '../core/transport';
 
@@ -26,14 +27,16 @@ const DEFAULT_REPLAY_FLUSH_MS = 5_000;
  * Failed sends do not count here, they are bounded by
  * the transport's own retry-queue cap.
  *
- * Approximate on the high side: per-event measurement
- * stops at SEGMENT_BYTES_LIMIT, so a full snapshot
- * counts as 60KB rather than its true size. Measuring
- * exactly would mean a full walk of every snapshot,
- * which is not worth it for a degraded-state guard:
- * stringifying a multi-megabyte snapshot just to size it
- * costs tens of milliseconds on the main thread, and the
- * transport stringifies it again to build the envelope.
+ * Counted from uncapped per-event measurements. Capping
+ * the estimate at the segment threshold is free for the
+ * flush trigger, which only needs to know that the
+ * buffer crossed it, but it scores a multi-megabyte
+ * snapshot as the cap: 23x under a real 1.36MB one. Those
+ * snapshots are what fills the buffer during a rate-limit
+ * stall, so the cap turned this ceiling into roughly 30MB
+ * of live JSON. The full walk is bounded by
+ * MAX_VISITED_NODES and still costs a fraction of the
+ * stringify the transport pays to build the envelope.
  */
 const MAX_PENDING_BYTES = 8_000_000;
 
@@ -233,9 +236,6 @@ let idlePaused = false;
 let idleExpired = false;
 let lastIdleArmMs = 0;
 let interactionTeardown:
-  | (() => void)
-  | null = null;
-let visibilityTeardown:
   | (() => void)
   | null = null;
 
@@ -551,10 +551,7 @@ function addToBuffer(event: eventWithTime) {
     requestRebase(true);
   }
   buffer.push(event);
-  bufferBytes += estimateJsonBytes(
-    event,
-    SEGMENT_BYTES_LIMIT,
-  );
+  bufferBytes += estimateJsonBytes(event);
 
   if (
     buffer.length >= MAX_BUFFER_SIZE ||
@@ -885,45 +882,40 @@ function teardownInteractionListeners() {
   }
 }
 
-// --- Visibility ---
+// --- Page exit ---
 
 /**
- * Flushes what is buffered when the tab goes away, but
- * leaves rrweb running.
+ * Hands the open segment over when the page is going
+ * away, but leaves rrweb running.
  *
- * Stopping here used to look free and was not: every
- * `record()` begins with a full snapshot, so returning to
- * the tab re-serialized the entire DOM. On a large page
- * that is the single most expensive thing the recorder
- * does, and tab switching is the most frequent thing a
- * user does, so it was being paid over and over. rrweb
- * also never removes a stopped recorder's mutation buffer
- * from its module-level list, so each stop/start cycle
- * leaked one and every later snapshot iterated it.
+ * Driven by the transport rather than by a
+ * `visibilitychange` listener here. The transport
+ * registers its listener first, so anything handed over
+ * from a listener of ours would reach the queue after
+ * the exit flush had already run and would leave with
+ * the page. Going through the transport also covers
+ * `pagehide`, which is the only signal a bfcache
+ * eviction gives.
+ *
+ * Stopping the recorder here used to look free and was
+ * not: every `record()` begins with a full snapshot, so
+ * returning to the tab re-serialized the entire DOM. On
+ * a large page that is the single most expensive thing
+ * the recorder does, and tab switching is the most
+ * frequent thing a user does, so it was being paid over
+ * and over. rrweb also never removes a stopped
+ * recorder's mutation buffer from its module-level list,
+ * so each stop/start cycle leaked one and every later
+ * snapshot iterated it.
  *
  * A hidden tab whose DOM does change should be recorded
  * anyway, and a hidden tab whose DOM does not change
  * costs an idle MutationObserver, which browsers already
  * throttle.
  */
-function setupVisibilityPause() {
-  if (typeof document === 'undefined') return;
-  const handler = () => {
-    if (document.visibilityState === 'hidden') {
-      flushMutationBatch();
-      flushReplayBuffer();
-    }
-  };
-  document.addEventListener(
-    'visibilitychange',
-    handler,
-  );
-  visibilityTeardown = () => {
-    document.removeEventListener(
-      'visibilitychange',
-      handler,
-    );
-  };
+function drainForExit() {
+  flushMutationBatch();
+  flushReplayBuffer();
 }
 
 // --- Public API ---
@@ -975,10 +967,10 @@ export async function initReplay() {
   setReplayDropHandler(() => {
     if (stopFn) requestRebase();
   });
+  setExitFlushHook(drainForExit);
 
   await startRecording();
   setupInteractionListeners();
-  setupVisibilityPause();
   armIdleTimers();
 }
 
@@ -993,10 +985,7 @@ export function hasReplayFlushed(): boolean {
 export function stopReplay() {
   stopRecording();
   teardownInteractionListeners();
-  if (visibilityTeardown) {
-    visibilityTeardown();
-    visibilityTeardown = null;
-  }
+  setExitFlushHook(null);
   if (overloadTimer) {
     clearTimeout(overloadTimer);
     overloadTimer = null;

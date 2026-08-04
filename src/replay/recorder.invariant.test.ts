@@ -53,11 +53,16 @@ vi.mock('rrweb', () => ({
   },
 }));
 
+let exitFlushHook: (() => void) | null = null;
+
 vi.mock('../core/transport', () => ({
   enqueue: (key: string, payload: any) =>
     enqueued.push({ key, payload }),
   isServerRateLimited: () => rateLimited,
   setReplayDropHandler: () => {},
+  setExitFlushHook: (fn: (() => void) | null) => {
+    exitFlushHook = fn;
+  },
 }));
 
 vi.mock('../core/session', () => ({
@@ -272,9 +277,10 @@ describe('replay recorder invariants', () => {
               ? 'session-2'
               : 'session-1';
         } else if (roll < 0.97) {
-          document.dispatchEvent(
-            new Event('visibilitychange'),
-          );
+          // The page going away, which the transport
+          // signals rather than the recorder observing
+          // it.
+          exitFlushHook?.();
         } else {
           // Full teardown and restart, as a host app
           // calling OodleRum.stop()/init() would do.

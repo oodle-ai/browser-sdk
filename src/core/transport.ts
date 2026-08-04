@@ -2,7 +2,10 @@ import { getConfig } from './config';
 import { estimateJsonBytes } from './size';
 import { getTags } from './tags';
 import { incrTelemetry } from './telemetry';
-import { compressSyncString } from './worker';
+import {
+  compressString,
+  compressSyncString,
+} from './worker';
 
 declare const __OODLE_RUM_VERSION__: string;
 export const SDK_VERSION: string =
@@ -71,6 +74,9 @@ let globalMaxWaitTimer: ReturnType<
   typeof setTimeout
 > | null = null;
 
+let exitFlushHook: (() => void) | null = null;
+let inExitFlush = false;
+
 function getFlushInterval(): number {
   try {
     return (
@@ -98,11 +104,10 @@ function getQueue(
   return q;
 }
 
-function compressBatchSync(
+function toBody(
+  compressed: Uint8Array | null,
   raw: string,
 ): { body: BodyInit; encoding: string } {
-  const compressed =
-    compressSyncString(raw);
   if (compressed) {
     return {
       body: new Blob([
@@ -113,6 +118,28 @@ function compressBatchSync(
   }
   incrTelemetry('compression_failures');
   return { body: raw, encoding: '' };
+}
+
+/**
+ * Used by every path that has a later tick available.
+ * Yields to the event loop while the browser gzips
+ * instead of holding the main thread for the payload.
+ */
+async function compressBatch(
+  raw: string,
+): Promise<{ body: BodyInit; encoding: string }> {
+  return toBody(await compressString(raw), raw);
+}
+
+/**
+ * Page-exit only: the document is going away, so there
+ * is no later tick to resume on and blocking is the
+ * only option.
+ */
+function compressBatchSync(
+  raw: string,
+): { body: BodyInit; encoding: string } {
+  return toBody(compressSyncString(raw), raw);
 }
 
 /**
@@ -131,13 +158,20 @@ const REPLAY_MEASURE_LIMIT = 64_000;
 function measure(
   batchKey: string,
   item: Payload,
+  bytesHint?: number,
 ): { bytes: number; oversized: boolean } {
   if (batchKey === REPLAY_BATCH_KEY) {
+    // The recorder already measured every event on its
+    // way into the segment. Walking the same graph a
+    // second time here doubled the per-event cost for
+    // no new information.
     return {
-      bytes: estimateJsonBytes(
-        item,
-        REPLAY_MEASURE_LIMIT,
-      ),
+      bytes:
+        bytesHint ??
+        estimateJsonBytes(
+          item,
+          REPLAY_MEASURE_LIMIT,
+        ),
       oversized: false,
     };
   }
@@ -296,7 +330,7 @@ async function send(
 
   try {
     const { body, encoding } =
-      compressBatchSync(raw);
+      await compressBatch(raw);
     const hdrs = { ...headers };
     if (encoding) {
       hdrs['Content-Encoding'] = encoding;
@@ -456,7 +490,7 @@ async function drainRetryQueue() {
 
     try {
       const { body, encoding } =
-        compressBatchSync(item.body);
+        await compressBatch(item.body);
       const hdrs = { ...item.headers };
       hdrs['Content-Type'] =
         'application/json';
@@ -533,10 +567,12 @@ function scheduleGlobalDebounce() {
 export function enqueue(
   batchKey: string,
   item: Payload,
+  bytesHint?: number,
 ) {
   const { bytes, oversized } = measure(
     batchKey,
     item,
+    bytesHint,
   );
   if (oversized) {
     console.warn(
@@ -551,9 +587,15 @@ export function enqueue(
   q.items.push(item);
   q.bytesEstimate += bytes;
 
+  // Draining a producer on the exit path can cross the
+  // threshold, and a nested flush there would send the
+  // batch the ordinary way: no beacon, no keepalive, on
+  // a document that is going away. The exit flush this
+  // is nested inside sends it properly a moment later.
   if (
-    q.items.length >= MAX_BATCH_SIZE ||
-    q.bytesEstimate >= MAX_BATCH_BYTES
+    !inExitFlush &&
+    (q.items.length >= MAX_BATCH_SIZE ||
+      q.bytesEstimate >= MAX_BATCH_BYTES)
   ) {
     flushAll();
     return;
@@ -594,8 +636,9 @@ export function upsert(
   }
 
   if (
-    q.items.length >= MAX_BATCH_SIZE ||
-    q.bytesEstimate >= MAX_BATCH_BYTES
+    !inExitFlush &&
+    (q.items.length >= MAX_BATCH_SIZE ||
+      q.bytesEstimate >= MAX_BATCH_BYTES)
   ) {
     flushAll();
     return;
@@ -604,10 +647,41 @@ export function upsert(
   scheduleGlobalDebounce();
 }
 
+/**
+ * Registers a producer that keeps its own buffer, so an
+ * exit flush can collect from it before building the
+ * envelope.
+ *
+ * A producer cannot do this from its own
+ * `visibilitychange` listener. Listeners run in
+ * registration order and the transport registers first,
+ * so anything handed over from a later listener lands in
+ * the queue after the exit flush has already run, and
+ * then waits on the debounce while the page goes away.
+ * `pagehide` has no second listener at all.
+ */
+export function setExitFlushHook(
+  fn: (() => void) | null,
+) {
+  exitFlushHook = fn;
+}
+
 const FLUSH_PRIORITY = ['events', 'replay'];
 
 export function flushAll(isExit = false) {
   const config = getConfig();
+
+  if (isExit && exitFlushHook && !inExitFlush) {
+    inExitFlush = true;
+    try {
+      exitFlushHook();
+    } catch {
+      // A producer that throws must not cost us the
+      // batches that are already queued.
+    } finally {
+      inExitFlush = false;
+    }
+  }
 
   if (
     !isExit &&
@@ -702,7 +776,7 @@ async function sendRaw(
 
   try {
     const { body, encoding } =
-      compressBatchSync(raw);
+      await compressBatch(raw);
     const hdrs = { ...headers };
     if (encoding) {
       hdrs['Content-Encoding'] = encoding;

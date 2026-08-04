@@ -2,13 +2,16 @@ import type { eventWithTime } from '@rrweb/types';
 import { getConfig } from '../core/config';
 import {
   getSessionId,
+  isReplaySampled,
   nextReplaySegmentIndex,
 } from '../core/session';
 import { estimateJsonBytes } from '../core/size';
 import { incrTelemetry } from '../core/telemetry';
+import { createMutationThrottler } from './mutation-throttle';
 import {
   enqueue,
   isServerRateLimited,
+  setExitFlushHook,
   setReplayDropHandler,
 } from '../core/transport';
 
@@ -24,18 +27,35 @@ const DEFAULT_REPLAY_FLUSH_MS = 5_000;
  * Failed sends do not count here, they are bounded by
  * the transport's own retry-queue cap.
  *
- * Approximate on the high side: per-event measurement
- * stops at SEGMENT_BYTES_LIMIT, so a full snapshot
- * counts as 60KB rather than its true size. Measuring
- * exactly would mean a full walk of every snapshot,
- * which is not worth it for a degraded-state guard.
+ * Counted from uncapped per-event measurements. Capping
+ * the estimate at the segment threshold is free for the
+ * flush trigger, which only needs to know that the
+ * buffer crossed it, but it scores a multi-megabyte
+ * snapshot as the cap: 23x under a real 1.36MB one. Those
+ * snapshots are what fills the buffer during a rate-limit
+ * stall, so the cap turned this ceiling into roughly 30MB
+ * of live JSON. The full walk is bounded by
+ * MAX_VISITED_NODES and still costs a fraction of the
+ * stringify the transport pays to build the envelope.
  */
 const MAX_PENDING_BYTES = 8_000_000;
 
 const FULL_SNAPSHOT = 2;
 const INCREMENTAL_SNAPSHOT = 3;
 
-const MUTATIONS_PER_WINDOW = 750;
+/**
+ * Absolute ceiling on mutation events accepted per
+ * window, and the only path that still drops one.
+ *
+ * Deliberately generous, because what used to justify a
+ * tight limit is now handled instead of dropped:
+ * attribute churn is shed per node and the drain is
+ * time-sliced. What is left is structural churn, where
+ * dropping an event invalidates the delta chain and
+ * forces a full re-serialization, so tripping this early
+ * costs far more than carrying the events.
+ */
+const MUTATIONS_PER_WINDOW = 3_000;
 const WINDOW_MS = 5000;
 const CIRCUIT_BREAK_THRESHOLD = 3;
 const OVERLOAD_COOLDOWN_MS = 30_000;
@@ -43,10 +63,87 @@ const MIN_REBASE_INTERVAL_MS = 5000;
 const MUTATION_BATCH_DELAY = 16;
 const MUTATION_BATCH_TIMEOUT = 100;
 
+/**
+ * Slice budget when the drain runs off a plain timer.
+ * Reaching that path means the browser never offered us
+ * idle time, so the page is busy and the slice stays
+ * short.
+ *
+ * Slicing at all matters because draining in one pass is
+ * unbounded work: a page that builds a large subtree in
+ * one commit queues thousands of events, and measuring
+ * them all before returning holds the main thread for
+ * the whole batch.
+ */
+const DRAIN_BUSY_MS = 4;
+
+/**
+ * Ceiling on a slice the browser gave us an idle
+ * deadline for. Idle periods run far longer than a few
+ * milliseconds, and every extra slice costs scheduling
+ * overhead, so draining more per idle period is strictly
+ * better than more slices doing the same total work.
+ */
+const DRAIN_IDLE_MAX_MS = 30;
+
+/**
+ * Checked only between chunks, so a slice always makes
+ * progress and small batches still drain in one pass
+ * regardless of how coarse the clock is.
+ */
+const DRAIN_CHUNK = 32;
+
+/**
+ * A full snapshot slower than this means the DOM is
+ * large enough that re-serializing it is worse for the
+ * page than losing the recording, so the usual
+ * three-strike allowance does not apply.
+ */
+const EXPENSIVE_SNAPSHOT_MS = 250;
+
+/**
+ * Every checkout is a full re-serialization of the DOM.
+ * Spacing them out costs seek granularity during
+ * playback and saves the recorded page real work.
+ */
+const CHECKOUT_INTERVAL_MS = 360_000;
+
+/**
+ * iOS and iPadOS. iPadOS reports itself as Macintosh, so
+ * touch points are what actually distinguish it.
+ */
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent ?? '';
+  if (/iPhone|iPad|iPod/i.test(ua)) return true;
+  return (
+    /Macintosh/i.test(ua) &&
+    (navigator.maxTouchPoints ?? 0) > 1
+  );
+}
+
 const DEFAULT_IDLE_PAUSE_MS = 300_000;
 const DEFAULT_IDLE_EXPIRE_MS = 900_000;
 
+/**
+ * Minimum gap between re-arming the idle timers from user
+ * activity. The thresholds they guard are minutes long,
+ * so being a second stale costs nothing, and the
+ * listeners include mousemove.
+ */
+const IDLE_ARM_THROTTLE_MS = 1_000;
+
 type RecordApi = typeof import('rrweb')['record'];
+
+/**
+ * Structural rather than the DOM lib type: a page that
+ * polyfills requestIdleCallback may invoke the callback
+ * with no deadline, or with a partial one.
+ */
+interface IdleDeadlineLike {
+  didTimeout: boolean;
+  timeRemaining(): number;
+}
 
 let recordApi: RecordApi | null = null;
 let stopFn: (() => void) | null = null;
@@ -97,12 +194,37 @@ let rebaseTimer: ReturnType<
 let lastRebaseAt = 0;
 
 let pendingMutations: eventWithTime[] = [];
+
+/**
+ * Read cursor into pendingMutations. A slice that runs
+ * out of budget leaves the rest in place and advances
+ * this instead of splicing, so resuming stays O(1)
+ * rather than re-copying the tail each time.
+ */
+let pendingCursor = 0;
 let mutationBatchTimer: ReturnType<
   typeof setTimeout
 > | null = null;
 let mutationIdleCancel:
   | (() => void)
   | null = null;
+
+/**
+ * Duration of the most recent full snapshot, used to
+ * decide whether another one is affordable.
+ */
+let lastSnapshotMs = 0;
+
+function nowMs(): number {
+  return typeof performance !== 'undefined' &&
+    typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+const mutationThrottler = createMutationThrottler(
+  () => recordApi?.mirror ?? null,
+);
 
 let idleTimer: ReturnType<
   typeof setTimeout
@@ -111,12 +233,9 @@ let expireTimer: ReturnType<
   typeof setTimeout
 > | null = null;
 let idlePaused = false;
-let visibilityPaused = false;
 let idleExpired = false;
+let lastIdleArmMs = 0;
 let interactionTeardown:
-  | (() => void)
-  | null = null;
-let visibilityTeardown:
   | (() => void)
   | null = null;
 
@@ -127,7 +246,7 @@ let replayConfig: {
   maskTextContent: boolean;
 } | null = null;
 
-function flushMutationBatch() {
+function clearMutationTimers() {
   if (mutationBatchTimer) {
     clearTimeout(mutationBatchTimer);
     mutationBatchTimer = null;
@@ -136,10 +255,72 @@ function flushMutationBatch() {
     mutationIdleCancel();
     mutationIdleCancel = null;
   }
-  const batch = pendingMutations.splice(0);
-  for (const event of batch) {
-    addToBuffer(event);
+}
+
+/**
+ * Drains the batch into the segment buffer.
+ *
+ * `sliced` of false drains everything before returning,
+ * which the ordering-critical callers need: a full
+ * snapshot replaces the DOM the queued mutations
+ * describe, so it may not be buffered while any of them
+ * are still queued behind it.
+ *
+ * A polyfilled requestIdleCallback may invoke its
+ * callback with no deadline, so the idle budget is only
+ * used when one actually arrives.
+ */
+function drainMutations(
+  sliced: boolean,
+  idleDeadline?: IdleDeadlineLike,
+) {
+  clearMutationTimers();
+  const idleMs =
+    idleDeadline && !idleDeadline.didTimeout
+      ? Math.min(
+          idleDeadline.timeRemaining(),
+          DRAIN_IDLE_MAX_MS,
+        )
+      : null;
+  const deadline = !sliced
+    ? Number.POSITIVE_INFINITY
+    : nowMs() + (idleMs ?? DRAIN_BUSY_MS);
+
+  while (
+    pendingCursor < pendingMutations.length
+  ) {
+    const end = Math.min(
+      pendingCursor + DRAIN_CHUNK,
+      pendingMutations.length,
+    );
+    while (pendingCursor < end) {
+      addToBuffer(
+        pendingMutations[pendingCursor++],
+      );
+    }
+    if (nowMs() >= deadline) break;
   }
+
+  if (
+    pendingCursor >= pendingMutations.length
+  ) {
+    pendingMutations = [];
+    pendingCursor = 0;
+    return;
+  }
+  // Reclaim the drained prefix so a run of
+  // budget-limited slices cannot grow the array without
+  // bound.
+  if (pendingCursor >= DRAIN_CHUNK * 8) {
+    pendingMutations =
+      pendingMutations.slice(pendingCursor);
+    pendingCursor = 0;
+  }
+  scheduleMutationFlush();
+}
+
+function flushMutationBatch() {
+  drainMutations(false);
 }
 
 function scheduleMutationFlush() {
@@ -148,9 +329,9 @@ function scheduleMutationFlush() {
     typeof requestIdleCallback !== 'undefined'
   ) {
     const id = requestIdleCallback(
-      () => {
+      (deadline?: IdleDeadlineLike) => {
         mutationIdleCancel = null;
-        flushMutationBatch();
+        drainMutations(true, deadline);
       },
       { timeout: MUTATION_BATCH_TIMEOUT },
     );
@@ -163,7 +344,7 @@ function scheduleMutationFlush() {
       mutationIdleCancel();
       mutationIdleCancel = null;
     }
-    flushMutationBatch();
+    drainMutations(true);
   }, MUTATION_BATCH_DELAY);
 }
 
@@ -209,7 +390,16 @@ function rebase() {
   if (recordingDisabled) return;
 
   rebaseStreak++;
-  if (rebaseStreak > CIRCUIT_BREAK_THRESHOLD) {
+  // A snapshot that already proved expensive gets one
+  // attempt, not three. The whole point of a re-base is
+  // to make the stream usable again, and on a DOM this
+  // large the snapshot costs the page more than the
+  // recovered recording is worth.
+  const streakLimit =
+    lastSnapshotMs > EXPENSIVE_SNAPSHOT_MS
+      ? 1
+      : CIRCUIT_BREAK_THRESHOLD;
+  if (rebaseStreak > streakLimit) {
     // The page is dropping events faster than it
     // settles. Serializing the whole DOM every few
     // seconds costs more than the recording is worth,
@@ -224,8 +414,15 @@ function rebase() {
   try {
     // Clears needsRebase via the emit handler once the
     // snapshot event actually arrives.
+    const startedAt = nowMs();
     recordApi.takeFullSnapshot(true);
+    lastSnapshotMs = nowMs() - startedAt;
     incrTelemetry('replay_rebases');
+    if (lastSnapshotMs > EXPENSIVE_SNAPSHOT_MS) {
+      incrTelemetry(
+        'replay_expensive_snapshots',
+      );
+    }
   } catch {
     // Restart instead: a fresh record() call always
     // begins with its own full snapshot. rrweb is
@@ -277,15 +474,20 @@ function flushReplayBuffer() {
   const sessionId = bufferSessionId;
   const index = bufferSegmentIndex;
   const batch = buffer.splice(0);
+  const batchBytes = bufferBytes;
   bufferBytes = 0;
   bufferSessionId = '';
   replayHasFlushed = true;
 
-  enqueue(REPLAY_BATCH_KEY, {
-    session_id: sessionId,
-    segment_index: index,
-    events: batch,
-  } as any);
+  enqueue(
+    REPLAY_BATCH_KEY,
+    {
+      session_id: sessionId,
+      segment_index: index,
+      events: batch,
+    } as any,
+    batchBytes,
+  );
 }
 
 /**
@@ -349,10 +551,7 @@ function addToBuffer(event: eventWithTime) {
     requestRebase(true);
   }
   buffer.push(event);
-  bufferBytes += estimateJsonBytes(
-    event,
-    SEGMENT_BYTES_LIMIT,
-  );
+  bufferBytes += estimateJsonBytes(event);
 
   if (
     buffer.length >= MAX_BUFFER_SIZE ||
@@ -380,7 +579,6 @@ function pauseForOverload() {
     windowStart = Date.now();
     if (
       !idlePaused &&
-      !visibilityPaused &&
       !idleExpired &&
       replayConfig
     ) {
@@ -431,14 +629,36 @@ function handleEvent(event: eventWithTime) {
     windowStart = now;
   }
 
+  // Shed attribute churn per node before the absolute
+  // ceiling is reached. This keeps the delta chain
+  // intact, so unlike a dropped event it never costs a
+  // re-snapshot.
+  const throttled = mutationThrottler.throttle(event);
+  if (throttled.dropped > 0) {
+    incrTelemetry(
+      'replay_attributes_throttled',
+      throttled.dropped,
+    );
+  }
+  // Absorbed entirely, so it never reaches the stream and
+  // must not spend the ceiling's budget: styling churn
+  // the throttler already handled would otherwise push a
+  // later structural mutation over the edge and cost the
+  // re-snapshot this design exists to avoid.
+  if (!throttled.event) return;
+
   mutationCount++;
   if (mutationCount > MUTATIONS_PER_WINDOW) {
+    // Past the ceiling the page is mutating structure,
+    // not just styling, faster than throttling can
+    // absorb. Only here is an event dropped, and only
+    // then does the stream need re-basing.
     dropEvent();
     requestRebase();
     return;
   }
 
-  pendingMutations.push(event);
+  pendingMutations.push(throttled.event);
   scheduleMutationFlush();
 }
 
@@ -459,6 +679,9 @@ async function startRecording(): Promise<void> {
 async function doStartRecording(): Promise<void> {
   if (!replayConfig) return;
 
+  // rrweb also honours its own `rr-block` class, so a
+  // host app can exclude a subtree too large to record
+  // without needing an SDK option for it.
   const BLOCK_SELECTOR =
     '[data-oodle-privacy="hidden"],' +
     '.oodle-privacy-hidden';
@@ -477,20 +700,46 @@ async function doStartRecording(): Promise<void> {
   needsRebase = false;
   mutationCount = 0;
   windowStart = Date.now();
+  // A fresh recorder builds a fresh mirror, so the node
+  // ids the per-node budgets are keyed on no longer refer
+  // to the same elements.
+  mutationThrottler.reset();
 
   stopFn =
     record({
       sampling: {
-        mousemove: 50,
+        // Recording mousemove on iOS blocks the main
+        // thread badly enough that Safari stalls, so it
+        // is off rather than merely sampled there.
+        mousemove: isAppleTouchDevice() ? false : 50,
         mouseInteraction: true,
         scroll: 100,
         input: 'last',
       },
       slimDOMOptions: 'all',
-      checkoutEveryNms: 300_000,
+      checkoutEveryNms: CHECKOUT_INTERVAL_MS,
+      /**
+       * rrweb runs this between `lock()` and `unlock()`
+       * of its mutation buffers with no `try/finally`, so
+       * an exception escaping here leaves the buffer
+       * locked and every later DOM mutation is silently
+       * discarded. Recording looks alive (mouse and
+       * scroll still arrive) while the replay stays
+       * frozen on the last snapshot.
+       */
       emit(event: eventWithTime) {
-        handleEvent(event);
+        try {
+          handleEvent(event);
+        } catch {
+          incrTelemetry('replay_emit_errors');
+        }
       },
+      /**
+       * Applies the same containment to rrweb's own
+       * observers, which are otherwise wrapped only when
+       * a handler is supplied.
+       */
+      errorHandler: () => true,
       maskAllInputs:
         replayConfig.maskAllInputs,
       maskInputOptions:
@@ -547,19 +796,52 @@ function resetIdleTimers() {
   expireTimer = setTimeout(() => {
     idleExpired = true;
     stopRecording();
-    teardownInteractionListeners();
   }, expireMs);
 }
 
+function armIdleTimers() {
+  lastIdleArmMs = nowMs();
+  resetIdleTimers();
+}
+
 function onUserInteraction() {
-  if (idleExpired) return;
+  if (idleExpired) {
+    // Expiry ends a replay; it must not end recording for
+    // the life of the page. A tab left open overnight
+    // expires while nobody is looking, and everything the
+    // user does when they come back is the session that
+    // actually matters. By now the session id has usually
+    // rotated, so this opens a new replay rather than
+    // resuming the abandoned one.
+    //
+    // Sampling is re-checked because the rotated session
+    // rolls its own dice: resuming regardless would
+    // record a session the server expects to never see.
+    if (!isReplaySampled()) return;
+    idleExpired = false;
+    idlePaused = false;
+    void startRecording();
+    armIdleTimers();
+    return;
+  }
+
   if (idlePaused) {
     idlePaused = false;
-    if (!visibilityPaused) {
-      void startRecording();
-    }
+    void startRecording();
+    armIdleTimers();
+    return;
   }
-  resetIdleTimers();
+
+  // Steady state. mousemove fires continuously, and
+  // re-arming means four timer operations, so the common
+  // case is throttled: the timers only need to be roughly
+  // right against a multi-minute threshold.
+  if (
+    nowMs() - lastIdleArmMs >=
+    IDLE_ARM_THROTTLE_MS
+  ) {
+    armIdleTimers();
+  }
 }
 
 function setupInteractionListeners() {
@@ -600,33 +882,40 @@ function teardownInteractionListeners() {
   }
 }
 
-// --- Visibility pause ---
+// --- Page exit ---
 
-function setupVisibilityPause() {
-  if (typeof document === 'undefined') return;
-  const handler = () => {
-    if (document.visibilityState === 'hidden') {
-      if (!visibilityPaused && stopFn) {
-        visibilityPaused = true;
-        stopRecording();
-      }
-    } else if (visibilityPaused) {
-      visibilityPaused = false;
-      if (!idlePaused && !idleExpired) {
-        void startRecording();
-      }
-    }
-  };
-  document.addEventListener(
-    'visibilitychange',
-    handler,
-  );
-  visibilityTeardown = () => {
-    document.removeEventListener(
-      'visibilitychange',
-      handler,
-    );
-  };
+/**
+ * Hands the open segment over when the page is going
+ * away, but leaves rrweb running.
+ *
+ * Driven by the transport rather than by a
+ * `visibilitychange` listener here. The transport
+ * registers its listener first, so anything handed over
+ * from a listener of ours would reach the queue after
+ * the exit flush had already run and would leave with
+ * the page. Going through the transport also covers
+ * `pagehide`, which is the only signal a bfcache
+ * eviction gives.
+ *
+ * Stopping the recorder here used to look free and was
+ * not: every `record()` begins with a full snapshot, so
+ * returning to the tab re-serialized the entire DOM. On
+ * a large page that is the single most expensive thing
+ * the recorder does, and tab switching is the most
+ * frequent thing a user does, so it was being paid over
+ * and over. rrweb also never removes a stopped
+ * recorder's mutation buffer from its module-level list,
+ * so each stop/start cycle leaked one and every later
+ * snapshot iterated it.
+ *
+ * A hidden tab whose DOM does change should be recorded
+ * anyway, and a hidden tab whose DOM does not change
+ * costs an idle MutationObserver, which browsers already
+ * throttle.
+ */
+function drainForExit() {
+  flushMutationBatch();
+  flushReplayBuffer();
 }
 
 // --- Public API ---
@@ -678,11 +967,11 @@ export async function initReplay() {
   setReplayDropHandler(() => {
     if (stopFn) requestRebase();
   });
+  setExitFlushHook(drainForExit);
 
   await startRecording();
   setupInteractionListeners();
-  setupVisibilityPause();
-  resetIdleTimers();
+  armIdleTimers();
 }
 
 export function isReplayActive(): boolean {
@@ -696,21 +985,22 @@ export function hasReplayFlushed(): boolean {
 export function stopReplay() {
   stopRecording();
   teardownInteractionListeners();
-  if (visibilityTeardown) {
-    visibilityTeardown();
-    visibilityTeardown = null;
-  }
+  setExitFlushHook(null);
   if (overloadTimer) {
     clearTimeout(overloadTimer);
     overloadTimer = null;
   }
   idlePaused = false;
-  visibilityPaused = false;
   idleExpired = false;
+  lastIdleArmMs = 0;
   recordingDisabled = false;
   replayHasFlushed = false;
   rebaseStreak = 0;
   mutationCount = 0;
+  lastSnapshotMs = 0;
+  pendingMutations = [];
+  pendingCursor = 0;
+  mutationThrottler.reset();
   replayConfig = null;
   recordApi = null;
   // bufferSessionId and its segment index deliberately

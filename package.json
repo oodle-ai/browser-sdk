@@ -1,6 +1,6 @@
 {
   "name": "@oodle-ai/rum",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Oodle Real User Monitoring SDK",
   "license": "Apache-2.0",
   "repository": {
@@ -63,7 +63,7 @@
   },
   "dependencies": {
     "fflate": "^0.8.2",
-    "rrweb": "2.0.0-alpha.20",
+    "rrweb": "2.1.1",
     "web-vitals": "^4.2.0"
   },
   "devDependencies": {

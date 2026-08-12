@@ -1,0 +1,178 @@
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+
+/**
+ * Tab-switch events are only useful if they survive the tab
+ * being switched away from, which makes their delivery a
+ * question of listener registration order rather than of
+ * anything in the event itself. These tests wire the real
+ * transport in, because with it mocked out an event queued
+ * too late still looks delivered.
+ */
+
+vi.mock('../core/config', () => ({
+  getConfig: () => ({
+    instanceId: 'inst',
+    apiKey: 'key',
+    endpoint: 'https://localhost',
+    service: 'test',
+    flushIntervalMs: 5000,
+    replayFlushIntervalMs: 5000,
+  }),
+}));
+
+vi.mock('../core/session', () => ({
+  getSessionId: () => 'session-1',
+  isSessionSampled: () => true,
+  incrementSessionCount: () => {},
+  getSessionCounts: () => ({
+    viewCount: 0,
+    errorCount: 0,
+    actionCount: 0,
+  }),
+}));
+
+vi.mock('../core/user', () => ({
+  getUserId: () => 'u1',
+  getUserName: () => '',
+  getUserEmail: () => '',
+  getUserStatus: () => 'anonymous',
+}));
+
+vi.mock('../core/flags', () => ({
+  getFeatureFlags: () => ({}),
+}));
+
+vi.mock('../core/tags', () => ({
+  getTags: () => ({ tier: 'gold' }),
+}));
+
+vi.mock('../core/telemetry', () => ({
+  incrTelemetry: () => {},
+}));
+
+vi.mock('../core/otel-bridge', () => ({
+  getActiveTraceContext: () => null,
+}));
+
+vi.mock('../replay/recorder', () => ({
+  isReplayActive: () => false,
+  hasReplayFlushed: () => false,
+}));
+
+vi.mock('../core/worker', () => ({
+  compressString: async () => null,
+  compressSyncString: () => null,
+}));
+
+const sent: string[] = [];
+
+function setVisibility(state: string) {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+async function readBody(body: unknown): Promise<string> {
+  if (typeof body === 'string') return body;
+  if (body instanceof Blob) return await body.text();
+  return String(body);
+}
+
+describe('tab visibility events', () => {
+  let transport: typeof import('../core/transport');
+  let faro: typeof import('./faro');
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    sent.length = 0;
+    setVisibility('visible');
+
+    (globalThis as any).fetch = vi.fn(
+      async (_url: string, opts: any) => {
+        sent.push(await readBody(opts?.body));
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+        };
+      },
+    );
+    (navigator as any).sendBeacon = vi.fn(
+      (_url: string, blob: Blob) => {
+        void blob.text().then((t) => sent.push(t));
+        return true;
+      },
+    );
+
+    transport = await import('../core/transport');
+    faro = await import('./faro');
+
+    // Same order as OodleRum.init: visibility tracking
+    // claims its listener before the transport claims the
+    // one that flushes on exit.
+    faro.initVisibilityTracking();
+    transport.initTransportListeners();
+  });
+
+  afterEach(() => {
+    faro.destroyEvents();
+    transport.destroyTransportListeners();
+    vi.useRealTimers();
+  });
+
+  it('gets the hidden event out on the exit flush', async () => {
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // No timer advance beyond a tick: the event has to
+    // leave on the exit flush the transport runs, not on
+    // the debounce, because the page may never come back.
+    const bodies = sent.join('');
+    expect(bodies).toContain('tab_hidden');
+    expect(bodies).toContain('"event_type":"visibility"');
+  });
+
+  it('records the return as a separate event', async () => {
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    sent.length = 0;
+
+    setVisibility('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    // Coming back is not an exit, so this one rides the
+    // ordinary debounce.
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(sent.join('')).toContain('tab_visible');
+  });
+
+  it('carries the current tags like any other event', async () => {
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent.join('')).toContain('gold');
+  });
+
+  it('stops emitting once torn down', async () => {
+    faro.destroyEvents();
+    sent.length = 0;
+
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(sent.join('')).not.toContain('visibility');
+  });
+});

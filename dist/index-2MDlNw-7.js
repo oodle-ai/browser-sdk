@@ -18,7 +18,7 @@ function go(e) {
     "[@oodle-ai/rum] endpoint uses plain HTTP. Use HTTPS in production."
   ), Zt = e;
 }
-function te() {
+function ne() {
   if (!Zt)
     throw new Error(
       "[@oodle-ai/rum] Not initialized. Call OodleRum.init() first."
@@ -342,8 +342,8 @@ var H = Uint8Array, N = Uint16Array, gn = Int32Array, _n = new H([
 Bo[28] = 258, nn[258] = 28;
 var qo = Ir(wn, 0), Hn = qo.r, rn = new N(32768);
 for (var b = 0; b < 32768; ++b) {
-  var re = (b & 43690) >> 1 | (b & 21845) << 1;
-  re = (re & 52428) >> 2 | (re & 13107) << 2, re = (re & 61680) >> 4 | (re & 3855) << 4, rn[b] = ((re & 65280) >> 8 | (re & 255) << 8) >> 1;
+  var oe = (b & 43690) >> 1 | (b & 21845) << 1;
+  oe = (oe & 52428) >> 2 | (oe & 13107) << 2, oe = (oe & 61680) >> 4 | (oe & 3855) << 4, rn[b] = ((oe & 65280) >> 8 | (oe & 255) << 8) >> 1;
 }
 var Je = (function(e, t, n) {
   for (var r = e.length, o = 0, i = new N(t); o < r; ++o)
@@ -474,9 +474,9 @@ var zo = /* @__PURE__ */ Je(ve, 9, 0), Xo = /* @__PURE__ */ Je(Mt, 5, 0), Mr = f
   var _e = l + 5 << 3, B = Xe(o, ve) + Xe(i, Mt) + s, q = Xe(o, d) + Xe(i, _) + s + 14 + 3 * D + Xe(g, P) + 2 * g[16] + 3 * g[17] + 7 * g[18];
   if (a >= 0 && _e <= B && _e <= q)
     return Lr(t, u, e.subarray(a, a + l));
-  var Y, A, z, ne;
+  var Y, A, z, re;
   if ($(t, u, 1 + (q < B)), u += 2, q < B) {
-    Y = Je(d, y, 0), A = d, z = Je(_, w, 0), ne = _;
+    Y = Je(d, y, 0), A = d, z = Je(_, w, 0), re = _;
     var Bt = Je(P, ge, 0);
     $(t, u, M - 257), $(t, u + 5, C - 1), $(t, u + 10, D - 4), u += 14;
     for (var v = 0; v < D; ++v)
@@ -488,14 +488,14 @@ var zo = /* @__PURE__ */ Je(ve, 9, 0), Xo = /* @__PURE__ */ Je(Mt, 5, 0), Mr = f
         $(t, u, Bt[W]), u += P[W], W > 15 && ($(t, u, we[v] >> 5 & 127), u += we[v] >> 12);
       }
   } else
-    Y = zo, A = ve, z = Xo, ne = Mt;
+    Y = zo, A = ve, z = Xo, re = Mt;
   for (var v = 0; v < c; ++v) {
     var L = r[v];
     if (L > 255) {
       var W = L >> 18 & 31;
       ze(t, u, Y[W + 257]), u += A[W + 257], W > 7 && ($(t, u, L >> 23 & 31), u += _n[W]);
       var Te = L & 31;
-      ze(t, u, z[Te]), u += ne[Te], Te > 3 && (ze(t, u, L >> 5 & 8191), u += wn[Te]);
+      ze(t, u, z[Te]), u += re[Te], Te > 3 && (ze(t, u, L >> 5 & 8191), u += wn[Te]);
     } else
       ze(t, u, Y[L]), u += A[L];
   }
@@ -517,14 +517,14 @@ var zo = /* @__PURE__ */ Je(ve, 9, 0), Xo = /* @__PURE__ */ Je(Mt, 5, 0), Mr = f
           for (var A = 0; A < 30; ++A)
             C[A] = 0;
         }
-        var z = 2, ne = 0, Bt = y, V = B - q & 32767;
+        var z = 2, re = 0, Bt = y, V = B - q & 32767;
         if (Y > 2 && _e == M(p - V))
           for (var qe = Math.min(d, Y) - 1, we = Math.min(32767, p), W = Math.min(258, Y); V <= we && --Bt && B != q; ) {
             if (e[p + z] == e[p + z - V]) {
               for (var L = 0; L < W && e[p + L] == e[p + L - V]; ++L)
                 ;
               if (L > z) {
-                if (z = L, ne = V, L > qe)
+                if (z = L, re = V, L > qe)
                   break;
                 for (var Te = Math.min(V, L - 2), Rn = 0, A = 0; A < Te; ++A) {
                   var qt = p - V + A & 32767, vo = _[qt], xn = qt - vo & 32767;
@@ -534,9 +534,9 @@ var zo = /* @__PURE__ */ Je(ve, 9, 0), Xo = /* @__PURE__ */ Je(Mt, 5, 0), Mr = f
             }
             B = q, q = _[B], V += B - q & 32767;
           }
-        if (ne) {
-          I[P++] = 268435456 | nn[z] << 18 | Hn[ne];
-          var On = nn[z] & 31, Pn = Hn[ne] & 31;
+        if (re) {
+          I[P++] = 268435456 | nn[z] << 18 | Hn[re];
+          var On = nn[z] & 31, Pn = Hn[re] & 31;
           v += _n[On] + wn[Pn], ++T[257 + On], ++C[Pn], ge = p + z, ++g;
         } else
           I[P++] = e[p], ++T[e[p]];
@@ -650,12 +650,12 @@ async function ni(e) {
   }
 }
 const ri = "0.3.0", qn = 5e3, Rr = 50, xr = 5e5, zn = 256e3, At = "replay", Or = 8e4, Pr = 32, oi = 2e7, ii = 5, si = 1e3, ai = 6e4, ci = 500, Lt = 63e3;
-let Ce = 0, Me = 0, oe = [], Ke = 0, Vt = null;
+let Ce = 0, Me = 0, ie = [], Ke = 0, Vt = null;
 const kt = /* @__PURE__ */ new Map();
 let Ae = null, Le = null, an = null, Qe = !1;
 function ui() {
   try {
-    return te().flushIntervalMs ?? qn;
+    return ne().flushIntervalMs ?? qn;
   } catch {
     return qn;
   }
@@ -730,7 +730,7 @@ function mi(e) {
 `);
 }
 function hi(e, t, n) {
-  const r = te();
+  const r = ne();
   if (typeof navigator < "u" && navigator.sendBeacon) {
     const a = e + `?api_key=${encodeURIComponent(
       r.apiKey
@@ -760,7 +760,7 @@ function Wt(e, t, n, r) {
     return;
   }
   const i = { ...t };
-  delete i["Content-Encoding"], oe.push({
+  delete i["Content-Encoding"], ie.push({
     url: e,
     headers: i,
     body: n,
@@ -770,9 +770,9 @@ function Wt(e, t, n, r) {
   }), Ke += o, Fr();
 }
 function Fr() {
-  if (Vt || oe.length === 0)
+  if (Vt || ie.length === 0)
     return;
-  const e = oe[0], t = Math.min(
+  const e = ie[0], t = Math.min(
     si * Math.pow(2, e.attempts),
     ai
   );
@@ -781,8 +781,8 @@ function Fr() {
   }, t);
 }
 async function Ur() {
-  for (; oe.length > 0 && Ce < Or && Me < Pr; ) {
-    const e = oe.shift();
+  for (; ie.length > 0 && Ce < Or && Me < Pr; ) {
+    const e = ie.shift();
     if (Ke -= e.bytes, e.attempts++, e.attempts > ii) {
       R("retry_drops"), e.batchKey && Nt(e.batchKey);
       continue;
@@ -800,17 +800,17 @@ async function Ur() {
         credentials: "omit"
       });
       if (qr(i), i.status === 429 || i.status >= 500) {
-        oe.unshift(e), Ke += e.bytes;
+        ie.unshift(e), Ke += e.bytes;
         break;
       }
     } catch {
-      oe.unshift(e), Ke += e.bytes;
+      ie.unshift(e), Ke += e.bytes;
       break;
     } finally {
       Ce -= t, Me--;
     }
   }
-  oe.length > 0 && Fr();
+  ie.length > 0 && Fr();
 }
 function vi() {
   Ae && (clearTimeout(Ae), Ae = null), Le && (clearTimeout(Le), Le = null);
@@ -818,11 +818,11 @@ function vi() {
 function Tn() {
   const e = ui();
   Ae && clearTimeout(Ae), Ae = setTimeout(
-    () => ae(),
+    () => te(),
     e
   ), Le || (Le = setTimeout(
     () => {
-      Le = null, ae();
+      Le = null, te();
     },
     e + ci
   ));
@@ -841,7 +841,7 @@ function En(e, t, n) {
   }
   const i = Dr(e);
   if (i.items.push(t), i.bytesEstimate += r, !Qe && (i.items.length >= Rr || i.bytesEstimate >= xr)) {
-    ae();
+    te();
     return;
   }
   Tn();
@@ -867,7 +867,7 @@ function yi(e, t, n) {
     i.items.push(n), i.upsertMap.set(t, c), i.bytesEstimate += r;
   }
   if (!Qe && (i.items.length >= Rr || i.bytesEstimate >= xr)) {
-    ae();
+    te();
     return;
   }
   Tn();
@@ -876,8 +876,8 @@ function Br(e) {
   an = e;
 }
 const Xn = ["events", "replay"];
-function ae(e = !1) {
-  const t = te();
+function te(e = !1) {
+  const t = ne();
   if (e && an && !Qe) {
     Qe = !0;
     try {
@@ -981,8 +981,8 @@ function _i(e) {
 const zr = typeof self < "u" && "onpagehide" in self ? "pagehide" : "beforeunload";
 function Yn() {
   typeof document > "u" || (Ze = () => {
-    document.visibilityState === "hidden" && ae(!0);
-  }, et = () => ae(!0), tt = (e) => {
+    document.visibilityState === "hidden" && te(!0);
+  }, et = () => te(!0), tt = (e) => {
     e.persisted && fn && fn();
   }, document.addEventListener(
     "visibilitychange",
@@ -1017,7 +1017,7 @@ function Ei() {
 function Si() {
   Rt.clear();
 }
-var dn, ie, nt, Xr, xt, Yr = -1, ye = function(e) {
+var dn, se, nt, Xr, xt, Yr = -1, ye = function(e) {
   addEventListener("pageshow", (function(t) {
     t.persisted && (Yr = t.timeStamp, e(t));
   }), !0);
@@ -1203,10 +1203,10 @@ var dn, ie, nt, Xr, xt, Yr = -1, ye = function(e) {
     })));
   }));
 }, Ve = { passive: !0, capture: !0 }, Di = /* @__PURE__ */ new Date(), Qn = function(e, t) {
-  ie || (ie = t, nt = e, Xr = /* @__PURE__ */ new Date(), Kr(removeEventListener), Jr());
+  se || (se = t, nt = e, Xr = /* @__PURE__ */ new Date(), Kr(removeEventListener), Jr());
 }, Jr = function() {
   if (nt >= 0 && nt < Xr - Di) {
-    var e = { entryType: "first-input", name: ie.type, target: ie.target, cancelable: ie.cancelable, startTime: ie.timeStamp, processingStart: ie.timeStamp + nt };
+    var e = { entryType: "first-input", name: se.type, target: se.target, cancelable: se.cancelable, startTime: se.timeStamp, processingStart: se.timeStamp + nt };
     xt.forEach((function(t) {
       t(e);
     })), xt = [];
@@ -1240,7 +1240,7 @@ var dn, ie, nt, Xr, xt, Yr = -1, ye = function(e) {
       s(c.takeRecords()), c.disconnect();
     }))), ye((function() {
       var a;
-      o = F("FID"), n = U(e, o, Zn, t.reportAllChanges), xt = [], nt = -1, ie = null, Kr(addEventListener), a = i, xt.push(a), Jr();
+      o = F("FID"), n = U(e, o, Zn, t.reportAllChanges), xt = [], nt = -1, se = null, Kr(addEventListener), a = i, xt.push(a), Jr();
     })));
   }));
 };
@@ -1349,7 +1349,7 @@ function ss() {
   return /iPhone|iPad|iPod/i.test(e) ? !0 : /Macintosh/i.test(e) && (navigator.maxTouchPoints ?? 0) > 1;
 }
 const as = 3e5, cs = 9e5, us = 1e3;
-let me = null, Z = null, Ye = null, Ne = [], He = 0, Se = "", Cn = !1, to = 0, $t = "", K = 0, he = Date.now(), ce = !1, ot = 0, fe = null, Fe = !1, ke = null, no = 0, J = [], j = 0, Re = null, se = null, wt = 0;
+let me = null, Z = null, Ye = null, Ne = [], He = 0, Se = "", Cn = !1, to = 0, $t = "", K = 0, he = Date.now(), ce = !1, ot = 0, fe = null, Fe = !1, ke = null, no = 0, J = [], j = 0, Re = null, ae = null, wt = 0;
 function Ue() {
   return typeof performance < "u" && typeof performance.now == "function" ? performance.now() : Date.now();
 }
@@ -1358,7 +1358,7 @@ const Mn = Wi(
 );
 let xe = null, de = null, Oe = !1, it = !1, An = 0, Tt = null, Q = null;
 function ls() {
-  Re && (clearTimeout(Re), Re = null), se && (se(), se = null);
+  Re && (clearTimeout(Re), Re = null), ae && (ae(), ae = null);
 }
 function hn(e, t) {
   ls();
@@ -1391,14 +1391,14 @@ function ro() {
     if (typeof requestIdleCallback < "u") {
       const e = requestIdleCallback(
         (t) => {
-          se = null, hn(!0, t);
+          ae = null, hn(!0, t);
         },
         { timeout: ns }
       );
-      se = () => cancelIdleCallback(e);
+      ae = () => cancelIdleCallback(e);
     }
     Re = setTimeout(() => {
-      Re = null, se && (se(), se = null), hn(!0);
+      Re = null, ae && (ae(), ae = null), hn(!0);
     }, ts);
   }
 }
@@ -1479,7 +1479,7 @@ function ps() {
 }
 function io() {
   if (Pe) return;
-  const e = te().replayFlushIntervalMs ?? $i;
+  const e = ne().replayFlushIntervalMs ?? $i;
   Pe = setTimeout(() => {
     Pe = null, dt();
   }, e);
@@ -1577,7 +1577,7 @@ function ct() {
   Z && (Z(), Z = null), ke && (clearTimeout(ke), ke = null), Fe = !1, Pt(), dt();
 }
 function ys() {
-  const e = te(), t = e.replayIdlePauseMs ?? as, n = e.replayIdleExpireMs ?? cs;
+  const e = ne(), t = e.replayIdlePauseMs ?? as, n = e.replayIdleExpireMs ?? cs;
   xe && clearTimeout(xe), de && (clearTimeout(de), de = null), xe = setTimeout(() => {
     Oe = !0, ct();
   }, t), de = setTimeout(() => {
@@ -1624,7 +1624,7 @@ function Ts() {
   Pt(), dt();
 }
 async function Es() {
-  const t = te().privacyLevel ?? "mask-user-input";
+  const t = ne().privacyLevel ?? "mask-user-input";
   let n = {}, r = !1, o = !0;
   t === "mask" ? (r = !0, n = {
     password: !0,
@@ -1685,7 +1685,7 @@ function As() {
 }
 function so() {
   As();
-  const e = Co(), t = Ei(), n = te(), r = {
+  const e = Co(), t = Ei(), n = ne(), r = {
     session_id: ee(),
     user_id: br(),
     user_name: Ao(),
@@ -1860,7 +1860,7 @@ function Ds() {
     x(() => ({
       event_type: "visibility",
       action_type: t ? "tab_hidden" : "tab_visible"
-    }));
+    })), t || te();
   };
   document.addEventListener(
     "visibilitychange",
@@ -1888,7 +1888,7 @@ function Ns() {
   });
 }
 function kn(e) {
-  const t = te().endpoint;
+  const t = ne().endpoint;
   return e.startsWith(t);
 }
 function Hs() {
@@ -1951,7 +1951,7 @@ function Jt(e, t, n) {
   );
 }
 function uo(e) {
-  const t = Fs(e), n = te();
+  const t = Fs(e), n = ne();
   let r = !1;
   const o = n.allowedTracingUrls;
   o && o.length > 0 && (r = Jt(
@@ -2490,7 +2490,7 @@ const sa = {
       e.replaySampleRate ?? 100
     ), ht = !0, Ds(), Yn(), Io(), Fo(), _i(() => {
       Yn();
-    }), e.sessionReplay !== !1 && Tr() && Es(), Rs(), vt = ta(), yt = na(), e.openTelemetry && import("./tracing-CS2DpQpy.js").then(
+    }), e.sessionReplay !== !1 && Tr() && Es(), Rs(), vt = ta(), yt = na(), e.openTelemetry && import("./tracing-CKS0ydSH.js").then(
       (t) => t.initOtelTracing(e)
     ).catch((t) => {
       console.warn(
@@ -2518,10 +2518,10 @@ const sa = {
     return br();
   },
   flush() {
-    ae();
+    te();
   },
   stop() {
-    ht && (Is(), ea(), Uo(), Er(), ae(!0), Si(), wi(), vt && (vt(), vt = null), yt && (yt(), yt = null), We(), ht = !1);
+    ht && (Is(), ea(), Uo(), Er(), te(!0), Si(), wi(), vt && (vt(), vt = null), yt && (yt(), yt = null), We(), ht = !1);
   }
 };
 function ta() {

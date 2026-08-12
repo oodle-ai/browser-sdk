@@ -27,6 +27,7 @@ import { getFeatureFlags } from '../core/flags';
 import {
   enqueue,
   upsert,
+  flushAll,
   isServerRateLimited,
 } from '../core/transport';
 import { tryConsume } from '../core/rate-limiter';
@@ -393,18 +394,34 @@ function initViewMetricsVisibility() {
  * recording) or forcing a second beacon on every tab hide.
  * `setExitFlushHook` would also solve the ordering, but it
  * is a single slot and the replay recorder owns it.
+ *
+ * `tab_visible` gets its own flush because it has none of
+ * that protection. The transport only flushes on the way
+ * out, so a return event would otherwise sit in the batch
+ * until the debounce elapsed, and the next thing to carry it
+ * anywhere was the following hide's exit send: a beacon that
+ * is skipped above `BEACON_MAX_BYTES`, falls back to a fetch
+ * marked `keepalive: false` at exactly that size, and has no
+ * retry queue behind it. Sessions came back with runs of
+ * consecutive `tab_hidden` and no partner, which reads as
+ * the user never returning. Flushing here instead sends it
+ * while the page is alive and foregrounded, through the
+ * retrying path.
  */
 export function initVisibilityTracking() {
   if (typeof document === 'undefined') return;
   const handler = () => {
     const hidden =
       document.visibilityState === 'hidden';
+    // Synchronous: emitEvent enqueues before flushAll
+    // drains, so the event is in the batch it builds.
     emitEvent(() => ({
       event_type: 'visibility',
       action_type: hidden
         ? 'tab_hidden'
         : 'tab_visible',
     }));
+    if (!hidden) flushAll();
   };
   document.addEventListener(
     'visibilitychange',

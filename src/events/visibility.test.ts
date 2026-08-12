@@ -150,9 +150,25 @@ describe('tab visibility events', () => {
 
     setVisibility('visible');
     document.dispatchEvent(new Event('visibilitychange'));
-    // Coming back is not an exit, so this one rides the
-    // ordinary debounce.
     await vi.advanceTimersByTimeAsync(6000);
+
+    expect(sent.join('')).toContain('tab_visible');
+  });
+
+  it('sends the return without waiting for the debounce', async () => {
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    sent.length = 0;
+
+    setVisibility('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    // Only a tick, nowhere near the debounce. Left in the
+    // batch, the return would be picked up by the next
+    // hide's exit send, which drops it whenever the beacon
+    // is skipped for size and has no retry behind it. That
+    // is what produced runs of consecutive tab_hidden.
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(sent.join('')).toContain('tab_visible');
   });

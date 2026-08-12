@@ -30,6 +30,7 @@ import {
   flushAll,
   isServerRateLimited,
 } from '../core/transport';
+import { estimateJsonBytes } from '../core/size';
 import { tryConsume } from '../core/rate-limiter';
 import { incrTelemetry } from '../core/telemetry';
 import {
@@ -274,8 +275,30 @@ function initErrorTracking() {
  */
 const MAX_CONSOLE_MESSAGE_CHARS = 8_192;
 
+function describeOversized(value: unknown): string {
+  const name = Array.isArray(value)
+    ? 'array'
+    : ((value as { constructor?: { name?: string } })
+        ?.constructor?.name ?? 'object');
+  return `[${name} over ${MAX_CONSOLE_MESSAGE_CHARS} bytes omitted]`;
+}
+
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
+  // Measure before serialising. Truncating the result still
+  // means building the whole string first, and the argument
+  // that motivated this — an rrweb mutation batch, logged
+  // many times a second while a replay struggles — is
+  // megabytes each time. `estimateJsonBytes` stops walking
+  // as soon as it knows the value is over the limit.
+  if (
+    estimateJsonBytes(
+      value,
+      MAX_CONSOLE_MESSAGE_CHARS + 1,
+    ) > MAX_CONSOLE_MESSAGE_CHARS
+  ) {
+    return describeOversized(value);
+  }
   try {
     return JSON.stringify(value) ?? String(value);
   } catch {
@@ -405,6 +428,36 @@ function initViewMetricsVisibility() {
 }
 
 /**
+ * Whether this tab went hidden and never recorded coming
+ * back. Per-tab and survives a reload, which is exactly the
+ * lifetime of the question being asked.
+ */
+const RETURN_OWED_KEY = 'oodle_rum_tab_hidden';
+
+function rememberHidden(hidden: boolean) {
+  try {
+    if (hidden) {
+      sessionStorage.setItem(RETURN_OWED_KEY, '1');
+    } else {
+      sessionStorage.removeItem(RETURN_OWED_KEY);
+    }
+  } catch {
+    // Storage unavailable; the recovery path just does not
+    // fire and pairing falls back to live events only.
+  }
+}
+
+function isReturnOwed(): boolean {
+  try {
+    return (
+      sessionStorage.getItem(RETURN_OWED_KEY) === '1'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Records tab switches, so a replay can show that the user
  * left the tab and when (or whether) they came back.
  *
@@ -442,26 +495,40 @@ function initViewMetricsVisibility() {
 export function initVisibilityTracking() {
   if (typeof document === 'undefined') return;
 
-  // A page that starts visible reports it, which is the only
-  // way a return gets recorded when the previous page never
-  // got to send one. A tab that is discarded or crashes while
-  // hidden leaves its `tab_hidden` unclosed forever; the
-  // reload that follows fires no `visibilitychange`, because
-  // the page was visible from its first paint. The session id
-  // survives the reload, so this closes that gap. On a
-  // genuinely new session it is a `tab_visible` with no hide
-  // before it, which pairs with nothing and reads as the
-  // no-op it is.
-  if (document.visibilityState === 'visible') {
+  // A tab that is discarded or crashes while hidden never
+  // sends its return, and the reload that follows fires no
+  // `visibilitychange` because the page is visible from its
+  // first paint. The hide would stay unclosed forever.
+  //
+  // `sessionStorage` survives that reload and is per-tab, so
+  // a flag left behind by the dead page says a return is
+  // still owed. Emitting only then keeps this off every
+  // ordinary page load, which would otherwise open each
+  // session with a `tab_visible` that pairs with nothing.
+  if (
+    document.visibilityState === 'visible' &&
+    isReturnOwed()
+  ) {
+    rememberHidden(false);
     emitEvent(() => ({
       event_type: 'visibility',
       action_type: 'tab_visible',
     }));
   }
 
+  // `visibilitychange` can fire without the state actually
+  // changing. Coalescing here keeps the pairing clean and,
+  // now that these events are outside the rate limiter,
+  // bounds what a page firing the event in a loop can queue.
+  let lastHidden =
+    document.visibilityState === 'hidden';
+
   const handler = () => {
     const hidden =
       document.visibilityState === 'hidden';
+    if (hidden === lastHidden) return;
+    lastHidden = hidden;
+    rememberHidden(hidden);
     // Synchronous: emitEvent enqueues before flushAll
     // drains, so the event is in the batch it builds.
     emitEvent(() => ({

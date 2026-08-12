@@ -124,13 +124,30 @@ describe('console capture size', () => {
     vi.useRealTimers();
   });
 
-  it('truncates a huge logged object', async () => {
+  it('summarises a huge logged object without serialising it', async () => {
     // rrweb warns with the whole mutation it could not
-    // apply. Captured verbatim, the string was built and
-    // measured before the transport binned it for size, and
-    // that work alone was enough to crash the tab.
+    // apply. Serialised and then cut, the megabyte string
+    // still had to be built first, many times a second, and
+    // that allocation alone was enough to crash the tab.
     const huge = { blob: 'x'.repeat(2_000_000) };
+    const stringify = vi.spyOn(JSON, 'stringify');
     console.warn('node not found', huge);
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const body = sent.join('');
+    expect(body).toContain('omitted');
+    expect(body.length).toBeLessThan(100_000);
+    // The payload itself is never handed to JSON.stringify.
+    expect(
+      stringify.mock.calls.some(
+        ([arg]) => arg === huge,
+      ),
+    ).toBe(false);
+    stringify.mockRestore();
+  });
+
+  it('truncates a huge logged string', async () => {
+    console.warn('x'.repeat(2_000_000));
     await vi.advanceTimersByTimeAsync(6000);
 
     const body = sent.join('');

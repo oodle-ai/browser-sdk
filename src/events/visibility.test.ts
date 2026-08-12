@@ -195,17 +195,51 @@ describe('tab visibility events', () => {
 
     expect(sent.join('')).not.toContain('visibility');
   });
-  it('reports a page that starts visible', async () => {
-    // The recovery path for a tab that died while hidden:
-    // the reload fires no visibilitychange, so without this
+  it('reports the return a dead tab still owed', async () => {
+    // A tab discarded while hidden leaves the flag behind.
+    // The reload fires no visibilitychange, so without this
     // the earlier tab_hidden would never be closed.
-    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(6000);
     faro.destroyEvents();
+    sessionStorage.setItem('oodle_rum_tab_hidden', '1');
+    sent.length = 0;
     setVisibility('visible');
     faro.initVisibilityTracking();
     await vi.advanceTimersByTimeAsync(6000);
 
     expect(sent.join('')).toContain('tab_visible');
+    expect(
+      sessionStorage.getItem('oodle_rum_tab_hidden'),
+    ).toBeNull();
+  });
+
+  it('stays quiet on an ordinary page load', async () => {
+    // Nothing owed, so no phantom return at the head of
+    // every session.
+    await vi.advanceTimersByTimeAsync(6000);
+    faro.destroyEvents();
+    sessionStorage.removeItem('oodle_rum_tab_hidden');
+    sent.length = 0;
+    setVisibility('visible');
+    faro.initVisibilityTracking();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(sent.join('')).not.toContain('tab_visible');
+  });
+
+  it('ignores a change that does not change the state', async () => {
+    await vi.advanceTimersByTimeAsync(6000);
+    sent.length = 0;
+
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const hides =
+      sent.join('').split('tab_hidden').length - 1;
+    expect(hides).toBe(1);
   });
 
   it('keeps emitting tab switches under a burst', async () => {

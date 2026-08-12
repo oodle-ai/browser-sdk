@@ -182,6 +182,10 @@ describe('tab visibility events', () => {
   });
 
   it('stops emitting once torn down', async () => {
+    // Drain the tab_visible that init emits for a page that
+    // starts visible, so what is left is only what the
+    // listeners produce after teardown.
+    await vi.advanceTimersByTimeAsync(6000);
     faro.destroyEvents();
     sent.length = 0;
 
@@ -190,5 +194,35 @@ describe('tab visibility events', () => {
     await vi.advanceTimersByTimeAsync(6000);
 
     expect(sent.join('')).not.toContain('visibility');
+  });
+  it('reports a page that starts visible', async () => {
+    // The recovery path for a tab that died while hidden:
+    // the reload fires no visibilitychange, so without this
+    // the earlier tab_hidden would never be closed.
+    sent.length = 0;
+    faro.destroyEvents();
+    setVisibility('visible');
+    faro.initVisibilityTracking();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(sent.join('')).toContain('tab_visible');
+  });
+
+  it('keeps emitting tab switches under a burst', async () => {
+    // Visibility is exempt from the rate limiter: dropping
+    // one orphans the hide it was meant to close.
+    await vi.advanceTimersByTimeAsync(6000);
+    sent.length = 0;
+    for (let i = 0; i < 60; i++) {
+      setVisibility(i % 2 === 0 ? 'hidden' : 'visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+    }
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const body = sent.join('');
+    const hides = body.split('tab_hidden').length - 1;
+    const shows = body.split('tab_visible').length - 1;
+    expect(hides).toBe(30);
+    expect(shows).toBe(30);
   });
 });

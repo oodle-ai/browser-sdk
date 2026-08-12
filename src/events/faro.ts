@@ -50,12 +50,20 @@ let cachedContext: {
   language: string;
 } | null = null;
 
+/**
+ * Types a runaway page can emit faster than we want to ship.
+ *
+ * `visibility` is deliberately absent: tab switches happen at
+ * human speed, so the bucket protects nothing, and dropping
+ * one is not a lost sample among thousands — it orphans the
+ * `tab_hidden` it was meant to close and a replay then shows
+ * the user as away while they were working.
+ */
 const RATE_LIMITED_TYPES = [
   'error',
   'action',
   'console',
   'resource',
-  'visibility',
 ];
 
 function isRateLimited(
@@ -251,13 +259,40 @@ function initErrorTracking() {
   });
 }
 
+/**
+ * A console line is a message, not a payload. Anything past
+ * this is truncated at the point of capture, before the
+ * string is ever built in full.
+ *
+ * Apps log big objects. `rrweb`'s replayer, for one, warns
+ * with the entire mutation it could not apply, which on a
+ * large DOM stringifies to well over a megabyte. Every such
+ * warning was becoming an event that got serialised, then
+ * measured, then dropped by the transport for being
+ * oversized — the work happening before the drop was enough
+ * to take the tab down.
+ */
+const MAX_CONSOLE_MESSAGE_CHARS = 8_192;
+
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value) ?? String(value);
   } catch {
     return String(value);
   }
+}
+
+function consoleMessage(args: unknown[]): string {
+  let out = '';
+  for (const arg of args) {
+    if (out.length >= MAX_CONSOLE_MESSAGE_CHARS) break;
+    if (out) out += ' ';
+    out += safeStringify(arg);
+  }
+  return out.length > MAX_CONSOLE_MESSAGE_CHARS
+    ? out.slice(0, MAX_CONSOLE_MESSAGE_CHARS) + '… [truncated]'
+    : out;
 }
 
 function initConsoleTracking() {
@@ -267,9 +302,7 @@ function initConsoleTracking() {
   };
 
   console.error = (...args: unknown[]) => {
-    const msg = args
-      .map(safeStringify)
-      .join(' ');
+    const msg = consoleMessage(args);
     emitEvent(() => ({
       event_type: 'console',
       console_level: 'error',
@@ -279,9 +312,7 @@ function initConsoleTracking() {
   };
 
   console.warn = (...args: unknown[]) => {
-    const msg = args
-      .map(safeStringify)
-      .join(' ');
+    const msg = consoleMessage(args);
     emitEvent(() => ({
       event_type: 'console',
       console_level: 'warn',
@@ -410,6 +441,24 @@ function initViewMetricsVisibility() {
  */
 export function initVisibilityTracking() {
   if (typeof document === 'undefined') return;
+
+  // A page that starts visible reports it, which is the only
+  // way a return gets recorded when the previous page never
+  // got to send one. A tab that is discarded or crashes while
+  // hidden leaves its `tab_hidden` unclosed forever; the
+  // reload that follows fires no `visibilitychange`, because
+  // the page was visible from its first paint. The session id
+  // survives the reload, so this closes that gap. On a
+  // genuinely new session it is a `tab_visible` with no hide
+  // before it, which pairs with nothing and reads as the
+  // no-op it is.
+  if (document.visibilityState === 'visible') {
+    emitEvent(() => ({
+      event_type: 'visibility',
+      action_type: 'tab_visible',
+    }));
+  }
+
   const handler = () => {
     const hidden =
       document.visibilityState === 'hidden';

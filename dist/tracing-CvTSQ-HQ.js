@@ -1,4 +1,4 @@
-import { s as v } from "./index-2MDlNw-7.js";
+import { s as v } from "./index-CZ4PY-fc.js";
 async function C(e) {
   const t = e.openTelemetry;
   if (!t) return;

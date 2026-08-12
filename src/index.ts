@@ -32,6 +32,7 @@ import {
 } from './core/flags';
 import {
   initEvents,
+  initVisibilityTracking,
   trackPageView,
   trackAction,
   trackCustomEvent,
@@ -74,6 +75,12 @@ export const OodleRum = {
       config.replaySampleRate ?? 100,
     );
     initialized = true;
+
+    // Ahead of initTransportListeners: a tab_hidden event
+    // only makes it out of the page if it is queued before
+    // the transport's own visibilitychange listener runs
+    // the exit flush. See initVisibilityTracking.
+    initVisibilityTracking();
 
     initTransportListeners();
     initSessionListeners();

@@ -27,8 +27,10 @@ import { getFeatureFlags } from '../core/flags';
 import {
   enqueue,
   upsert,
+  flushAll,
   isServerRateLimited,
 } from '../core/transport';
+import { estimateJsonBytes } from '../core/size';
 import { tryConsume } from '../core/rate-limiter';
 import { incrTelemetry } from '../core/telemetry';
 import {
@@ -49,6 +51,15 @@ let cachedContext: {
   language: string;
 } | null = null;
 
+/**
+ * Types a runaway page can emit faster than we want to ship.
+ *
+ * `visibility` is deliberately absent: tab switches happen at
+ * human speed, so the bucket protects nothing, and dropping
+ * one is not a lost sample among thousands — it orphans the
+ * `tab_hidden` it was meant to close and a replay then shows
+ * the user as away while they were working.
+ */
 const RATE_LIMITED_TYPES = [
   'error',
   'action',
@@ -249,13 +260,62 @@ function initErrorTracking() {
   });
 }
 
+/**
+ * A console line is a message, not a payload. Anything past
+ * this is truncated at the point of capture, before the
+ * string is ever built in full.
+ *
+ * Apps log big objects. `rrweb`'s replayer, for one, warns
+ * with the entire mutation it could not apply, which on a
+ * large DOM stringifies to well over a megabyte. Every such
+ * warning was becoming an event that got serialised, then
+ * measured, then dropped by the transport for being
+ * oversized — the work happening before the drop was enough
+ * to take the tab down.
+ */
+const MAX_CONSOLE_MESSAGE_CHARS = 8_192;
+
+function describeOversized(value: unknown): string {
+  const name = Array.isArray(value)
+    ? 'array'
+    : ((value as { constructor?: { name?: string } })
+        ?.constructor?.name ?? 'object');
+  return `[${name} over ${MAX_CONSOLE_MESSAGE_CHARS} bytes omitted]`;
+}
+
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
+  // Measure before serialising. Truncating the result still
+  // means building the whole string first, and the argument
+  // that motivated this — an rrweb mutation batch, logged
+  // many times a second while a replay struggles — is
+  // megabytes each time. `estimateJsonBytes` stops walking
+  // as soon as it knows the value is over the limit.
+  if (
+    estimateJsonBytes(
+      value,
+      MAX_CONSOLE_MESSAGE_CHARS + 1,
+    ) > MAX_CONSOLE_MESSAGE_CHARS
+  ) {
+    return describeOversized(value);
+  }
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value) ?? String(value);
   } catch {
     return String(value);
   }
+}
+
+function consoleMessage(args: unknown[]): string {
+  let out = '';
+  for (const arg of args) {
+    if (out.length >= MAX_CONSOLE_MESSAGE_CHARS) break;
+    if (out) out += ' ';
+    out += safeStringify(arg);
+  }
+  return out.length > MAX_CONSOLE_MESSAGE_CHARS
+    ? out.slice(0, MAX_CONSOLE_MESSAGE_CHARS) + '… [truncated]'
+    : out;
 }
 
 function initConsoleTracking() {
@@ -265,9 +325,7 @@ function initConsoleTracking() {
   };
 
   console.error = (...args: unknown[]) => {
-    const msg = args
-      .map(safeStringify)
-      .join(' ');
+    const msg = consoleMessage(args);
     emitEvent(() => ({
       event_type: 'console',
       console_level: 'error',
@@ -277,9 +335,7 @@ function initConsoleTracking() {
   };
 
   console.warn = (...args: unknown[]) => {
-    const msg = args
-      .map(safeStringify)
-      .join(' ');
+    const msg = consoleMessage(args);
     emitEvent(() => ({
       event_type: 'console',
       console_level: 'warn',
@@ -358,6 +414,131 @@ function initViewMetricsVisibility() {
       }
       flushViewMetrics();
     }
+  };
+  document.addEventListener(
+    'visibilitychange',
+    handler,
+  );
+  teardownFns.push(() => {
+    document.removeEventListener(
+      'visibilitychange',
+      handler,
+    );
+  });
+}
+
+/**
+ * Whether this tab went hidden and never recorded coming
+ * back. Per-tab and survives a reload, which is exactly the
+ * lifetime of the question being asked.
+ */
+const RETURN_OWED_KEY = 'oodle_rum_tab_hidden';
+
+function rememberHidden(hidden: boolean) {
+  try {
+    if (hidden) {
+      sessionStorage.setItem(RETURN_OWED_KEY, '1');
+    } else {
+      sessionStorage.removeItem(RETURN_OWED_KEY);
+    }
+  } catch {
+    // Storage unavailable; the recovery path just does not
+    // fire and pairing falls back to live events only.
+  }
+}
+
+function isReturnOwed(): boolean {
+  try {
+    return (
+      sessionStorage.getItem(RETURN_OWED_KEY) === '1'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Records tab switches, so a replay can show that the user
+ * left the tab and when (or whether) they came back.
+ *
+ * The two events carry no duration of their own: the time
+ * away is the gap between a `tab_hidden` and the next
+ * `tab_visible`. An unpaired hide is not evidence that the
+ * user stayed away — far more often the tab died while
+ * hidden — so consumers should read it as the end of what we
+ * know, and everything below exists to make it rare.
+ *
+ * Registered from `init()` *before* `initTransportListeners`
+ * rather than from `initEvents()` with the other producers.
+ * Listeners fire in registration order, so going first means
+ * the `tab_hidden` event is already queued when the
+ * transport's own `visibilitychange` listener runs its exit
+ * flush, and it leaves on that beacon. Registering later
+ * would mean either losing the event whenever the tab is
+ * discarded without being shown again (the case most worth
+ * recording) or forcing a second beacon on every tab hide.
+ * `setExitFlushHook` would also solve the ordering, but it
+ * is a single slot and the replay recorder owns it.
+ *
+ * `tab_visible` gets its own flush because it has none of
+ * that protection. The transport only flushes on the way
+ * out, so a return event would otherwise sit in the batch
+ * until the debounce elapsed, and the next thing to carry it
+ * anywhere was the following hide's exit send: a beacon that
+ * is skipped above `BEACON_MAX_BYTES`, falls back to a fetch
+ * marked `keepalive: false` at exactly that size, and has no
+ * retry queue behind it. Sessions came back with runs of
+ * consecutive `tab_hidden` and no partner, which reads as
+ * the user never returning. Flushing here instead sends it
+ * while the page is alive and foregrounded, through the
+ * retrying path.
+ */
+export function initVisibilityTracking() {
+  if (typeof document === 'undefined') return;
+
+  // A tab that is discarded or crashes while hidden never
+  // sends its return, and the reload that follows fires no
+  // `visibilitychange` because the page is visible from its
+  // first paint. The hide would stay unclosed forever.
+  //
+  // `sessionStorage` survives that reload and is per-tab, so
+  // a flag left behind by the dead page says a return is
+  // still owed. Emitting only then keeps this off every
+  // ordinary page load, which would otherwise open each
+  // session with a `tab_visible` that pairs with nothing.
+  if (
+    document.visibilityState === 'visible' &&
+    isReturnOwed()
+  ) {
+    rememberHidden(false);
+    emitEvent(() => ({
+      event_type: 'visibility',
+      action_type: 'tab_visible',
+    }));
+  }
+
+  // `visibilitychange` can fire without the state actually
+  // changing. Coalescing here keeps the pairing clean and,
+  // now that these events are outside the rate limiter,
+  // bounds what a page firing the event in a loop can queue.
+  let lastHidden =
+    document.visibilityState === 'hidden';
+
+  const handler = () => {
+    const hidden =
+      document.visibilityState === 'hidden';
+    if (hidden === lastHidden) return;
+    lastHidden = hidden;
+    rememberHidden(hidden);
+    // Synchronous: emitEvent enqueues before flushAll
+    // drains, so the event is in the batch it builds.
+    emitEvent(() => ({
+      event_type: 'visibility',
+      action_type: hidden
+        ? 'tab_hidden'
+        : 'tab_visible',
+    }));
+    if (!hidden) flushAll();
   };
   document.addEventListener(
     'visibilitychange',

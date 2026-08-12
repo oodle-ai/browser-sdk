@@ -5,9 +5,10 @@ export declare function initEvents(): void;
  *
  * The two events carry no duration of their own: the time
  * away is the gap between a `tab_hidden` and the next
- * `tab_visible`. A session that ends while hidden simply
- * has no closing event, which reads correctly as "never
- * came back" rather than as a fabricated return.
+ * `tab_visible`. An unpaired hide is not evidence that the
+ * user stayed away — far more often the tab died while
+ * hidden — so consumers should read it as the end of what we
+ * know, and everything below exists to make it rare.
  *
  * Registered from `init()` *before* `initTransportListeners`
  * rather than from `initEvents()` with the other producers.

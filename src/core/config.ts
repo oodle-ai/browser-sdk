@@ -58,16 +58,21 @@ function isAllowedEndpoint(
   }
 }
 
+/**
+ * Returns false when the config was rejected, so init()
+ * can stop rather than come up half-built: without a
+ * stored config every getConfig() downstream throws.
+ */
 export function setConfig(
   config: OodleRumConfig,
-) {
+): boolean {
   if (!isAllowedEndpoint(config.endpoint)) {
     console.error(
       '[@oodle-ai/rum] endpoint must be on' +
         ' *.oodle.ai or localhost.' +
         ` Got: ${config.endpoint}`,
     );
-    return;
+    return false;
   }
   if (
     typeof window !== 'undefined' &&
@@ -81,6 +86,7 @@ export function setConfig(
     );
   }
   _config = config;
+  return true;
 }
 
 export function getConfig(): OodleRumConfig {

@@ -68,7 +68,7 @@ let pendingActivityTimer:
 export const OodleRum = {
   init(config: OodleRumConfig) {
     if (initialized) return;
-    setConfig(config);
+    if (!setConfig(config)) return;
     initTags(config.tags);
     setSampleRates(
       config.sessionSampleRate ?? 100,
@@ -116,6 +116,16 @@ export const OodleRum = {
     }
   },
 
+  // The methods below are safe to call whether or not
+  // init() ran. Apps commonly gate init() on environment
+  // (production only) while calling identify/trackEvent
+  // unconditionally from shared code; those calls go
+  // nowhere instead of throwing.
+  //
+  // setTags/identify/addFeatureFlag stay live even when
+  // uninitialized, so state recorded before an init() that
+  // comes later still applies once it does.
+
   setTags(tags: Record<string, string>) {
     _setTags(tags);
   },
@@ -128,6 +138,7 @@ export const OodleRum = {
     name: string,
     properties?: Record<string, unknown>,
   ) {
+    if (!initialized) return;
     trackCustomEvent(name, properties);
   },
 
@@ -136,6 +147,9 @@ export const OodleRum = {
   },
 
   getSessionId(): string {
+    // Not merely a config read: this mints and persists a
+    // session. An uninitialized SDK must not touch storage.
+    if (!initialized) return '';
     return getSessionId();
   },
 
@@ -144,6 +158,7 @@ export const OodleRum = {
   },
 
   flush() {
+    if (!initialized) return;
     flushAll();
   },
 

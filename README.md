@@ -28,6 +28,28 @@ OodleRum.init({
 });
 ```
 
+### Enabling it per environment
+
+Gate `init()` alone — the rest of the API is safe to call
+unconditionally from shared code:
+
+```javascript
+if (import.meta.env.PROD) {
+  OodleRum.init({ /* ... */ });
+}
+
+// No environment check needed here or at any other call site.
+OodleRum.identify({ id: user.id });
+OodleRum.trackEvent('checkout_completed');
+```
+
+Without `init()`, nothing is recorded and nothing is sent:
+`trackEvent` and `flush` do nothing, and `getSessionId()`
+returns `''`. `identify`, `setTags`, and `addFeatureFlag`
+keep working, so state set before a later `init()` still
+applies once it runs — a `setTags` call takes precedence
+over the `tags` passed to `init()` on any key both set.
+
 ## User identification
 
 ```javascript

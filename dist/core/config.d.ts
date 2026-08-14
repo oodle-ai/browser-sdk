@@ -32,5 +32,10 @@ export interface OodleRumConfig {
     replayIdlePauseMs?: number;
     replayIdleExpireMs?: number;
 }
-export declare function setConfig(config: OodleRumConfig): void;
+/**
+ * Returns false when the config was rejected, so init()
+ * can stop rather than come up half-built: without a
+ * stored config every getConfig() downstream throws.
+ */
+export declare function setConfig(config: OodleRumConfig): boolean;
 export declare function getConfig(): OodleRumConfig;

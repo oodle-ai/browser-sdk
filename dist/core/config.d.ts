@@ -33,7 +33,7 @@ export interface OodleRumConfig {
      * Names match exactly (case-sensitive). The kept parameters are
      * on every event, because every event carries `view_url`.
      */
-    viewUrlQueryParams?: string[];
+    viewUrlQueryParams?: readonly string[];
     openTelemetry?: boolean | OtelConfig;
     flushIntervalMs?: number;
     replayFlushIntervalMs?: number;
@@ -53,5 +53,5 @@ export declare function setConfig(config: OodleRumConfig): boolean;
  * would match by substring and keep parameters it does not name,
  * and any other non-array value would throw and stop all events.
  */
-export declare function normalizeQueryParamNames(value: unknown): string[] | undefined;
+export declare function normalizeQueryParamNames(value: unknown): readonly string[] | undefined;
 export declare function getConfig(): OodleRumConfig;

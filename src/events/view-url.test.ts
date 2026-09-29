@@ -112,6 +112,13 @@ describe('viewUrl', () => {
     ).toBe('https://app.example.com/traces?id=1&id=3');
   });
 
+  it('accepts a readonly list', () => {
+    const names = ['traceId'] as const;
+    expect(viewUrl(loc('?traceId=a%3Ab&x=1'), names)).toBe(
+      'https://app.example.com/traces?traceId=a%3Ab',
+    );
+  });
+
   it('keeps no parameter and does not throw for a non-array value', () => {
     // A string must not match by substring: 'traceId' holds 't'.
     for (const bad of ['traceId', 42, { traceId: 1 }]) {

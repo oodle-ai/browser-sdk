@@ -103,7 +103,7 @@ function stripQuery(url: string): string {
  */
 export function viewUrl(
   location: Pick<Location, 'origin' | 'pathname' | 'search'>,
-  keep: string[] | undefined,
+  keep: readonly string[] | undefined,
 ): string {
   const base = location.origin + location.pathname;
   // setConfig() already normalizes the option. Check again here,
@@ -222,6 +222,11 @@ function emitViewEvent(
     data.event_type as string;
   incrementSessionCount(eventType);
   const ctx = baseContext();
+  // One row per page load, so the key is the path and not
+  // view_url. Each update replaces the whole row, so view_url is
+  // the URL at the last metric: a record the user opened after the
+  // page loaded can show in it. Route changes are separate view
+  // events (trackPageView), so they record each opened record.
   const viewId =
     (ctx.session_id as string) +
     ':' +

@@ -98,10 +98,14 @@ OodleRum.trackEvent('checkout_completed', {
 
 ## Privacy
 
-Query strings are automatically stripped from all captured URLs to prevent
-token and PII leakage. To keep a parameter that only identifies page state,
-such as the ID of the record a page shows, list its name in
-`viewUrlQueryParams`:
+The SDK removes the query string from `view_url` and `referrer_url`, because
+a query string can hold tokens or personal data. Two other places keep the
+full URL: `resource_url` on network request events, and the page URL that
+session replay records. Keep secrets out of URLs, or turn off
+`sessionReplay` for pages that have them in the URL.
+
+To keep a parameter that only identifies page state, such as the ID of the
+record a page shows, list its name in `viewUrlQueryParams`:
 
 - Every event (views, actions, errors, resources, console) carries
   `view_url`, so every event keeps the listed parameters.
@@ -112,11 +116,13 @@ such as the ID of the record a page shows, list its name in
   views by page, use `view_url_path`.
 - Names match exactly and are case-sensitive.
 - The kept parameters are encoded again, so `view_url` can differ from
-  the address bar in its encoding (for example, `+` for a space).
+  the address bar (for example, `%3A` for `:` and `+` for a space).
+  Decode the value before you compare it with an ID.
 - Parameters after `#` in hash-based routes are not kept.
 - A value that is not an array of strings is ignored, with a console
-  warning. The `privacyLevel` setting controls input masking
-in session replay:
+  warning.
+
+The `privacyLevel` setting controls input masking in session replay:
 
 - `'mask-user-input'` (default) — masks password and email fields
 - `'mask'` — masks all text content and all input types

@@ -95,6 +95,29 @@ function stripQuery(url: string): string {
   }
 }
 
+/**
+ * The page URL without its query string, except for the
+ * parameters in `viewUrlQueryParams`. Those stay, so that a
+ * view records the page state the app keeps in the URL (for
+ * example the record that a drawer shows).
+ */
+export function viewUrl(
+  location: Pick<Location, 'origin' | 'pathname' | 'search'>,
+  keep: string[] | undefined,
+): string {
+  const base = location.origin + location.pathname;
+  if (!keep || keep.length === 0 || !location.search) {
+    return base;
+  }
+  const params = new URLSearchParams(location.search);
+  const kept = new URLSearchParams();
+  params.forEach((value, name) => {
+    if (keep.includes(name)) kept.append(name, value);
+  });
+  const query = kept.toString();
+  return query ? base + '?' + query : base;
+}
+
 function ensureCachedContext() {
   if (!cachedContext) {
     cachedContext = {
@@ -122,9 +145,10 @@ function baseContext(): Record<string, unknown> {
     env: config.env ?? '',
     version: config.version ?? '',
     timestamp: new Date().toISOString(),
-    view_url:
-      window.location.origin +
-      window.location.pathname,
+    view_url: viewUrl(
+      window.location,
+      config.viewUrlQueryParams,
+    ),
     view_url_host: window.location.hostname,
     view_url_path: window.location.pathname,
     referrer_url: stripQuery(document.referrer),

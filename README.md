@@ -84,6 +84,7 @@ OodleRum.trackEvent('checkout_completed', {
 | `replaySampleRate` | `number` | `100` | Percentage of tracked sessions to record replay (0-100) |
 | `privacyLevel` | `string` | `'mask-user-input'` | `'mask-user-input'` masks password/email inputs; `'mask'` masks all text and inputs; `'allow'` masks nothing |
 | `tags` | `object` | `undefined` | Custom key-value tags attached to all events |
+| `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` (for example `['traceId']`). All other parameters are dropped |
 
 ## What's collected
 
@@ -98,7 +99,10 @@ OodleRum.trackEvent('checkout_completed', {
 ## Privacy
 
 Query strings are automatically stripped from all captured URLs to prevent
-token and PII leakage. The `privacyLevel` setting controls input masking
+token and PII leakage. To keep a parameter that only identifies page state,
+such as the ID of the record a page shows, list its name in
+`viewUrlQueryParams`. Only `view_url` keeps it; `view_url_path` and
+`referrer_url` never contain a query string. The `privacyLevel` setting controls input masking
 in session replay:
 
 - `'mask-user-input'` (default) — masks password and email fields

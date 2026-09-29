@@ -31,6 +31,13 @@ export interface OodleRumConfig {
   forwardNetworkBodies?: NetworkBodiesConfig;
   forwardNetworkHeaders?: NetworkHeadersConfig;
   tags?: Record<string, string>;
+  /**
+   * Query parameter names to keep in `view_url`. All other
+   * parameters are dropped, because a query string can hold
+   * tokens or personal data. Keep only IDs that the app puts in
+   * the URL to address a page state, such as the selected record.
+   */
+  viewUrlQueryParams?: string[];
   openTelemetry?: boolean | OtelConfig;
   flushIntervalMs?: number;
   replayFlushIntervalMs?: number;

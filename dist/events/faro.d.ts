@@ -1,3 +1,10 @@
+/**
+ * The page URL without its query string, except for the
+ * parameters in `viewUrlQueryParams`. Those stay, so that a
+ * view records the page state the app keeps in the URL (for
+ * example the record that a drawer shows).
+ */
+export declare function viewUrl(location: Pick<Location, 'origin' | 'pathname' | 'search'>, keep: readonly string[] | undefined): string;
 export declare function initEvents(): void;
 /**
  * Records tab switches, so a replay can show that the user

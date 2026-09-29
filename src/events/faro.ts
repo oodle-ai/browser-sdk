@@ -95,6 +95,35 @@ function stripQuery(url: string): string {
   }
 }
 
+/**
+ * The page URL without its query string, except for the
+ * parameters in `viewUrlQueryParams`. Those stay, so that a
+ * view records the page state the app keeps in the URL (for
+ * example the record that a drawer shows).
+ */
+export function viewUrl(
+  location: Pick<Location, 'origin' | 'pathname' | 'search'>,
+  keep: readonly string[] | undefined,
+): string {
+  const base = location.origin + location.pathname;
+  // setConfig() already normalizes the option. Check again here,
+  // because this runs for every event and must never throw.
+  if (
+    !Array.isArray(keep) ||
+    keep.length === 0 ||
+    !location.search
+  ) {
+    return base;
+  }
+  const params = new URLSearchParams(location.search);
+  const kept = new URLSearchParams();
+  params.forEach((value, name) => {
+    if (keep.includes(name)) kept.append(name, value);
+  });
+  const query = kept.toString();
+  return query ? base + '?' + query : base;
+}
+
 function ensureCachedContext() {
   if (!cachedContext) {
     cachedContext = {
@@ -122,9 +151,10 @@ function baseContext(): Record<string, unknown> {
     env: config.env ?? '',
     version: config.version ?? '',
     timestamp: new Date().toISOString(),
-    view_url:
-      window.location.origin +
-      window.location.pathname,
+    view_url: viewUrl(
+      window.location,
+      config.viewUrlQueryParams,
+    ),
     view_url_host: window.location.hostname,
     view_url_path: window.location.pathname,
     referrer_url: stripQuery(document.referrer),
@@ -192,6 +222,11 @@ function emitViewEvent(
     data.event_type as string;
   incrementSessionCount(eventType);
   const ctx = baseContext();
+  // One row per page load, so the key is the path and not
+  // view_url. Each update replaces the whole row, so view_url is
+  // the URL at the last metric: a record the user opened after the
+  // page loaded can show in it. Route changes are separate view
+  // events (trackPageView), so they record each opened record.
   const viewId =
     (ctx.session_id as string) +
     ':' +

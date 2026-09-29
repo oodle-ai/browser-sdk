@@ -30,6 +30,8 @@ export interface OodleRumConfig {
      * parameters are dropped, because a query string can hold
      * tokens or personal data. Keep only IDs that the app puts in
      * the URL to address a page state, such as the selected record.
+     * Names match exactly (case-sensitive). The kept parameters are
+     * on every event, because every event carries `view_url`.
      */
     viewUrlQueryParams?: string[];
     openTelemetry?: boolean | OtelConfig;
@@ -45,4 +47,11 @@ export interface OodleRumConfig {
  * stored config every getConfig() downstream throws.
  */
 export declare function setConfig(config: OodleRumConfig): boolean;
+/**
+ * Keeps only an array of non-empty strings. The allowlist is read
+ * for every event, so a wrong type must not reach it: a string
+ * would match by substring and keep parameters it does not name,
+ * and any other non-array value would throw and stop all events.
+ */
+export declare function normalizeQueryParamNames(value: unknown): string[] | undefined;
 export declare function getConfig(): OodleRumConfig;

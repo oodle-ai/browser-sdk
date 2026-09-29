@@ -106,7 +106,13 @@ export function viewUrl(
   keep: string[] | undefined,
 ): string {
   const base = location.origin + location.pathname;
-  if (!keep || keep.length === 0 || !location.search) {
+  // setConfig() already normalizes the option. Check again here,
+  // because this runs for every event and must never throw.
+  if (
+    !Array.isArray(keep) ||
+    keep.length === 0 ||
+    !location.search
+  ) {
     return base;
   }
   const params = new URLSearchParams(location.search);

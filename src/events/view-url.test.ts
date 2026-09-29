@@ -112,6 +112,15 @@ describe('viewUrl', () => {
     ).toBe('https://app.example.com/traces?id=1&id=3');
   });
 
+  it('keeps no parameter and does not throw for a non-array value', () => {
+    // A string must not match by substring: 'traceId' holds 't'.
+    for (const bad of ['traceId', 42, { traceId: 1 }]) {
+      expect(
+        viewUrl(loc('?t=1&traceId=abc'), bad as unknown as string[]),
+      ).toBe('https://app.example.com/traces');
+    }
+  });
+
   it('adds no "?" when no listed parameter is present', () => {
     expect(viewUrl(loc('?token=s3cret'), ['traceId'])).toBe(
       'https://app.example.com/traces',

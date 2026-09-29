@@ -84,7 +84,7 @@ OodleRum.trackEvent('checkout_completed', {
 | `replaySampleRate` | `number` | `100` | Percentage of tracked sessions to record replay (0-100) |
 | `privacyLevel` | `string` | `'mask-user-input'` | `'mask-user-input'` masks password/email inputs; `'mask'` masks all text and inputs; `'allow'` masks nothing |
 | `tags` | `object` | `undefined` | Custom key-value tags attached to all events |
-| `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` (for example `['traceId']`). All other parameters are dropped |
+| `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` on every event (for example `['traceId']`). All other parameters are dropped. See [Privacy](#privacy) |
 
 ## What's collected
 
@@ -101,8 +101,21 @@ OodleRum.trackEvent('checkout_completed', {
 Query strings are automatically stripped from all captured URLs to prevent
 token and PII leakage. To keep a parameter that only identifies page state,
 such as the ID of the record a page shows, list its name in
-`viewUrlQueryParams`. Only `view_url` keeps it; `view_url_path` and
-`referrer_url` never contain a query string. The `privacyLevel` setting controls input masking
+`viewUrlQueryParams`:
+
+- Every event (views, actions, errors, resources, console) carries
+  `view_url`, so every event keeps the listed parameters.
+  `view_url_path` and `referrer_url` never contain a query string.
+- The SDK keeps the value of a listed parameter as it is. Do not list
+  a parameter that can hold personal data or a token.
+- `view_url` gets one value for each record ID. To count or group
+  views by page, use `view_url_path`.
+- Names match exactly and are case-sensitive.
+- The kept parameters are encoded again, so `view_url` can differ from
+  the address bar in its encoding (for example, `+` for a space).
+- Parameters after `#` in hash-based routes are not kept.
+- A value that is not an array of strings is ignored, with a console
+  warning. The `privacyLevel` setting controls input masking
 in session replay:
 
 - `'mask-user-input'` (default) — masks password and email fields

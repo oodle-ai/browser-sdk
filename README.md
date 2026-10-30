@@ -85,6 +85,19 @@ OodleRum.trackEvent('checkout_completed', {
 | `privacyLevel` | `string` | `'mask-user-input'` | `'mask-user-input'` masks password/email inputs; `'mask'` masks all text and inputs; `'allow'` masks nothing |
 | `tags` | `object` | `undefined` | Custom key-value tags attached to all events |
 | `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` on every event (for example `['traceId']`). All other parameters are dropped. See [Privacy](#privacy) |
+| `openTelemetry` | `boolean \| object` | `undefined` | Send browser traces for fetch and XHR calls. See [Browser tracing](#browser-tracing) |
+| `allowedTracingUrls` | `(string \| RegExp)[]` | all URLs | URLs that get the `traceparent` header |
+
+## Browser tracing
+
+Set `openTelemetry: true` to send browser traces. You do not install
+other packages: the OpenTelemetry packages are dependencies of
+`@oodle-ai/rum`. The SDK loads them in separate chunks only when
+`openTelemetry` is on, so an app without tracing does not download them.
+
+```javascript
+OodleRum.init({ /* ... */, openTelemetry: true });
+```
 
 ## What's collected
 

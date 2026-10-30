@@ -16,6 +16,9 @@ export default defineConfig({
       fileName: 'oodle-rum',
     },
     rollupOptions: {
+      // OpenTelemetry stays out of dist. The app bundler resolves it
+      // from our dependencies and keeps it in lazy chunks, so an app
+      // with tracing off does not download it.
       external: [
         /^@opentelemetry\//,
         'zone.js',

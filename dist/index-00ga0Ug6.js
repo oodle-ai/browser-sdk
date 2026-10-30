@@ -665,7 +665,7 @@ async function si(e) {
     return wt(e);
   }
 }
-const ai = "0.4.0", Xn = 5e3, Pr = 50, Dr = 5e5, Yn = 256e3, Rt = "replay", Nr = 8e4, Ur = 32, ci = 2e7, ui = 5, li = 1e3, fi = 6e4, di = 500, kt = 63e3;
+const ai = "0.5.0", Xn = 5e3, Pr = 50, Dr = 5e5, Yn = 256e3, Rt = "replay", Nr = 8e4, Ur = 32, ci = 2e7, ui = 5, li = 1e3, fi = 6e4, di = 500, kt = 63e3;
 let Me = 0, Ce = 0, ie = [], Ze = 0, jt = null;
 const xt = /* @__PURE__ */ new Map();
 let Le = null, Re = null, cn = null, et = !1;
@@ -2556,7 +2556,7 @@ const pa = {
       e.replaySampleRate ?? 100
     ), ue = !0, Xs(), Wn(), Lo(), zo(), Si(() => {
       Wn();
-    }), e.sessionReplay !== !1 && br() && Is(), Ns(), gt = ua(), _t = la(), e.openTelemetry && import("./tracing-Y4gY9oSH.js").then(
+    }), e.sessionReplay !== !1 && br() && Is(), Ns(), gt = ua(), _t = la(), e.openTelemetry && import("./tracing-BjmjuQRU.js").then(
       (t) => t.initOtelTracing(e)
     ).catch((t) => {
       console.warn(

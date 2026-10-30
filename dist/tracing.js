@@ -1,5 +1,5 @@
-import { s as v } from "./index-0XAdSdgU.js";
-async function C(e) {
+import { s as x, b as g } from "./tracing-loader-DVdE_ng2.js";
+async function I(e) {
   const t = e.openTelemetry;
   if (!t) return;
   const r = typeof t == "boolean" ? { enabled: t } : t;
@@ -42,7 +42,7 @@ async function C(e) {
     ...r.customAttributes || {}
   }, b = l.resourceFromAttributes(
     y
-  ), w = new s.OTLPTraceExporter({
+  ), T = new s.OTLPTraceExporter({
     url: c,
     headers: {
       "X-OODLE-INSTANCE": e.instanceId,
@@ -52,19 +52,19 @@ async function C(e) {
     resource: b,
     spanProcessors: [
       new n.BatchSpanProcessor(
-        w
+        T
       )
     ]
-  }), u = U(e), d = [
+  }), u = h(e), d = [
     new RegExp(
-      g(e.endpoint) + "/v1/rum/"
+      U(e.endpoint) + "/v1/rum/"
     )
   ];
   m.register({
     contextManager: new a.ZoneContextManager(),
     propagator: new p.W3CTraceContextPropagator()
-  }), v(o.trace, o.context);
-  const x = i.getWebAutoInstrumentations(
+  }), x(o.trace, o.context);
+  const w = i.getWebAutoInstrumentations(
     {
       "@opentelemetry/instrumentation-fetch": {
         propagateTraceHeaderCorsUrls: u,
@@ -77,21 +77,19 @@ async function C(e) {
       "@opentelemetry/instrumentation-user-interaction": { enabled: !1 },
       "@opentelemetry/instrumentation-document-load": { enabled: !1 }
     }
-  ), { registerInstrumentations: T } = await import("@opentelemetry/instrumentation");
-  T({
-    instrumentations: x,
+  ), { registerInstrumentations: v } = await import("@opentelemetry/instrumentation");
+  v({
+    instrumentations: w,
     tracerProvider: m
   }), console.debug(
     "[@oodle-ai/rum] OpenTelemetry tracing initialized, exporting to:",
     c
   );
 }
-function g(e) {
+function U(e) {
   return e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function U(e) {
+function h(e) {
   return e.allowedTracingUrls && e.allowedTracingUrls.length > 0 ? e.allowedTracingUrls : [/.*/];
 }
-export {
-  C as initOtelTracing
-};
+g(I);

@@ -1,6 +1,6 @@
 {
   "name": "@oodle-ai/rum",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Oodle Real User Monitoring SDK",
   "license": "Apache-2.0",
   "repository": {
@@ -16,6 +16,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/oodle-rum.js",
       "require": "./dist/oodle-rum.cjs"
+    },
+    "./tracing": {
+      "types": "./dist/tracing.d.ts",
+      "import": "./dist/tracing.js",
+      "require": "./dist/tracing.cjs"
     }
   },
   "files": [
@@ -31,12 +36,13 @@
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.9.0 || ^2.0.0",
-    "@opentelemetry/auto-instrumentations-web": ">=0.62.0",
-    "@opentelemetry/context-zone": "^1.30.0 || ^2.0.0",
-    "@opentelemetry/exporter-trace-otlp-http": ">=0.57.0",
-    "@opentelemetry/resources": "^1.30.0 || ^2.0.0",
-    "@opentelemetry/sdk-trace-web": "^1.30.0 || ^2.0.0",
-    "zone.js": ">=0.14.0"
+    "@opentelemetry/auto-instrumentations-web": ">=0.62.0 <0.69.0",
+    "@opentelemetry/context-zone": "^2.0.0",
+    "@opentelemetry/exporter-trace-otlp-http": ">=0.200.0 <0.300.0",
+    "@opentelemetry/resources": "^2.0.0",
+    "@opentelemetry/sdk-trace-web": "^2.0.0",
+    "zone.js": ">=0.14.0",
+    "@opentelemetry/core": "^2.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
@@ -58,6 +64,9 @@
       "optional": true
     },
     "zone.js": {
+      "optional": true
+    },
+    "@opentelemetry/core": {
       "optional": true
     }
   },

@@ -46,6 +46,7 @@ import {
   initTelemetry,
   destroyTelemetry,
 } from './core/telemetry';
+import { getTracingInit } from './core/tracing-loader';
 
 const NativeMutationObserver =
   typeof MutationObserver !== 'undefined'
@@ -104,15 +105,23 @@ export const OodleRum = {
       setupClickTracking();
 
     if (config.openTelemetry) {
-      import('./otel/tracing').then((m) =>
-        m.initOtelTracing(config),
-      ).catch((e) => {
+      const tracingInit = getTracingInit();
+      if (!tracingInit) {
         console.warn(
-          '[@oodle-ai/rum] Failed to init' +
-            ' OpenTelemetry:',
-          e,
+          '[@oodle-ai/rum] openTelemetry is on, but' +
+            " '@oodle-ai/rum/tracing' is not imported." +
+            " Add `import '@oodle-ai/rum/tracing';`" +
+            ' before OodleRum.init() to send traces.',
         );
-      });
+      } else {
+        tracingInit(config).catch((e) => {
+          console.warn(
+            '[@oodle-ai/rum] Failed to init' +
+              ' OpenTelemetry:',
+            e,
+          );
+        });
+      }
     }
   },
 

@@ -85,6 +85,34 @@ OodleRum.trackEvent('checkout_completed', {
 | `privacyLevel` | `string` | `'mask-user-input'` | `'mask-user-input'` masks password/email inputs; `'mask'` masks all text and inputs; `'allow'` masks nothing |
 | `tags` | `object` | `undefined` | Custom key-value tags attached to all events |
 | `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` on every event (for example `['traceId']`). All other parameters are dropped. See [Privacy](#privacy) |
+| `openTelemetry` | `boolean \| object` | `undefined` | Send browser traces. Needs the tracing entry, see [Browser tracing](#browser-tracing) |
+
+## Browser tracing
+
+Tracing is optional, and it is a separate entry so that an app without it
+needs no OpenTelemetry packages. To turn it on, install the peer packages,
+import the entry once before `OodleRum.init()`, and set `openTelemetry`:
+
+```sh
+npm install "@opentelemetry/api@~1.9.0" "@opentelemetry/core@^2" \
+  "@opentelemetry/resources@^2" "@opentelemetry/sdk-trace-web@^2" \
+  "@opentelemetry/context-zone@^2" "@opentelemetry/exporter-trace-otlp-http@^0.223.0" \
+  "@opentelemetry/auto-instrumentations-web@~0.68.0" zone.js
+```
+
+The tracing entry uses the OpenTelemetry JS 2.x API (`resourceFromAttributes`),
+so the 1.x packages do not work. OpenTelemetry JS 3.0 is not supported yet:
+`auto-instrumentations-web` 0.69 and later need it.
+
+```js
+import '@oodle-ai/rum/tracing';
+import { OodleRum } from '@oodle-ai/rum';
+
+OodleRum.init({ /* ... */, openTelemetry: true });
+```
+
+Before 0.5.0 the main entry loaded tracing itself. It now logs a warning
+when `openTelemetry` is set and the tracing entry is not imported.
 
 ## What's collected
 

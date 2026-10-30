@@ -10,10 +10,16 @@ export default defineConfig({
   },
   build: {
     lib: {
-      entry: 'src/index.ts',
+      // Tracing is its own entry, so the main bundle never names the
+      // optional OpenTelemetry packages (see core/tracing-loader.ts).
+      entry: {
+        'oodle-rum': 'src/index.ts',
+        tracing: 'src/tracing.ts',
+      },
       name: 'OodleRum',
       formats: ['es', 'cjs'],
-      fileName: 'oodle-rum',
+      fileName: (format, entryName) =>
+        `${entryName}.${format === 'es' ? 'js' : 'cjs'}`,
     },
     rollupOptions: {
       external: [

@@ -66,15 +66,9 @@ export async function initOtelTracing(
     ]);
   } catch (e) {
     console.warn(
-      '[@oodle-ai/rum] OpenTelemetry peer deps' +
-        ' not installed. Install them to enable' +
-        ' browser tracing:\n' +
-        '  npm install @opentelemetry/api' +
-        ' @opentelemetry/auto-instrumentations-web' +
-        ' @opentelemetry/sdk-trace-web' +
-        ' @opentelemetry/exporter-trace-otlp-http' +
-        ' @opentelemetry/context-zone' +
-        ' @opentelemetry/resources zone.js',
+      '[@oodle-ai/rum] Failed to load' +
+        ' OpenTelemetry. Browser tracing is off:',
+      e,
     );
     return;
   }

@@ -1,18 +1,18 @@
-import { s as v } from "./index-0XAdSdgU.js";
-async function C(e) {
+import { s as g } from "./index-00ga0Ug6.js";
+async function E(e) {
   const t = e.openTelemetry;
   if (!t) return;
   const r = typeof t == "boolean" ? { enabled: t } : t;
   if (!r.enabled) return;
-  let n, s, a, l, i, p, o;
+  let n, s, a, i, l, c, o;
   try {
     [
       n,
       s,
       a,
-      l,
       i,
-      p,
+      l,
+      c,
       o
     ] = await Promise.all([
       import("@opentelemetry/sdk-trace-web"),
@@ -23,14 +23,14 @@ async function C(e) {
       import("@opentelemetry/core"),
       import("@opentelemetry/api")
     ]);
-  } catch {
+  } catch (y) {
     console.warn(
-      `[@oodle-ai/rum] OpenTelemetry peer deps not installed. Install them to enable browser tracing:
-  npm install @opentelemetry/api @opentelemetry/auto-instrumentations-web @opentelemetry/sdk-trace-web @opentelemetry/exporter-trace-otlp-http @opentelemetry/context-zone @opentelemetry/resources zone.js`
+      "[@oodle-ai/rum] Failed to load OpenTelemetry. Browser tracing is off:",
+      y
     );
     return;
   }
-  const c = r.tracesEndpoint || `${e.endpoint}/v1/rum/traces`, y = {
+  const p = r.tracesEndpoint || `${e.endpoint}/v1/rum/traces`, T = {
     "service.name": e.service,
     ...e.env && {
       "deployment.environment": e.env
@@ -40,31 +40,31 @@ async function C(e) {
     },
     "oodle.instance_id": e.instanceId,
     ...r.customAttributes || {}
-  }, b = l.resourceFromAttributes(
-    y
+  }, v = i.resourceFromAttributes(
+    T
   ), w = new s.OTLPTraceExporter({
-    url: c,
+    url: p,
     headers: {
       "X-OODLE-INSTANCE": e.instanceId,
       "X-API-KEY": e.apiKey
     }
   }), m = new n.WebTracerProvider({
-    resource: b,
+    resource: v,
     spanProcessors: [
       new n.BatchSpanProcessor(
         w
       )
     ]
-  }), u = U(e), d = [
+  }), u = A(e), d = [
     new RegExp(
-      g(e.endpoint) + "/v1/rum/"
+      U(e.endpoint) + "/v1/rum/"
     )
   ];
   m.register({
     contextManager: new a.ZoneContextManager(),
-    propagator: new p.W3CTraceContextPropagator()
-  }), v(o.trace, o.context);
-  const x = i.getWebAutoInstrumentations(
+    propagator: new c.W3CTraceContextPropagator()
+  }), g(o.trace, o.context);
+  const x = l.getWebAutoInstrumentations(
     {
       "@opentelemetry/instrumentation-fetch": {
         propagateTraceHeaderCorsUrls: u,
@@ -77,21 +77,21 @@ async function C(e) {
       "@opentelemetry/instrumentation-user-interaction": { enabled: !1 },
       "@opentelemetry/instrumentation-document-load": { enabled: !1 }
     }
-  ), { registerInstrumentations: T } = await import("@opentelemetry/instrumentation");
-  T({
+  ), { registerInstrumentations: b } = await import("@opentelemetry/instrumentation");
+  b({
     instrumentations: x,
     tracerProvider: m
   }), console.debug(
     "[@oodle-ai/rum] OpenTelemetry tracing initialized, exporting to:",
-    c
+    p
   );
 }
-function g(e) {
+function U(e) {
   return e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function U(e) {
+function A(e) {
   return e.allowedTracingUrls && e.allowedTracingUrls.length > 0 ? e.allowedTracingUrls : [/.*/];
 }
 export {
-  C as initOtelTracing
+  E as initOtelTracing
 };

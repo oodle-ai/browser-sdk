@@ -14,6 +14,20 @@ export declare function viewUrl(location: Pick<Location, 'origin' | 'pathname' |
 export declare function applyBeforeSend(event: Record<string, unknown>): Record<string, unknown> | null;
 export declare function initEvents(): void;
 /**
+ * Registers the unhandled-rejection listener again. Called
+ * once zone.js has loaded (browser tracing).
+ *
+ * zone.js replaces the global Promise. A rejected zone
+ * promise never fires the browser's own `unhandledrejection`:
+ * zone.js calls only the listeners added through its patched
+ * `addEventListener`, and ours was added before zone.js
+ * loaded, so every such rejection went unrecorded. Removing
+ * it first matters: promises that zone.js does not own, such
+ * as those async functions return, still fire the native
+ * event, and two registrations would record them twice.
+ */
+export declare function reattachRejectionListener(): void;
+/**
  * Records tab switches, so a replay can show that the user
  * left the tab and when (or whether) they came back.
  *

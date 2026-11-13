@@ -122,6 +122,13 @@ other packages: the OpenTelemetry packages are dependencies of
 OodleRum.init({ /* ... */, openTelemetry: true });
 ```
 
+Tracing uses zone.js, which replaces the global `Promise` when tracing
+starts. After that, a rejected promise reaches only the `unhandledrejection`
+listeners added once zone.js has loaded. The SDK moves its own listener
+over, so it keeps recording unhandled rejections. If your app adds an
+`unhandledrejection` listener before `init()`, add it again after tracing
+has started, or add it later in app start-up.
+
 ## What's collected
 
 - **Web Vitals** — LCP, FID, CLS, INP, TTFB, FCP

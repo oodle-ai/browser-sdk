@@ -1,10 +1,10 @@
-import { r as g, s as U, a as P } from "./index-BeHhirwD.js";
-const h = ["url.full", "http.url"], A = {
+import { r as g, s as U, a as P, b as h } from "./index-HSClfNQS.js";
+const A = ["url.full", "http.url"], E = {
   onStart() {
   },
   onEnd(e) {
     const t = e.attributes;
-    for (const r of h) {
+    for (const r of A) {
       const o = t[r];
       typeof o == "string" && (t[r] = P(o));
     }
@@ -12,7 +12,7 @@ const h = ["url.full", "http.url"], A = {
   forceFlush: () => Promise.resolve(),
   shutdown: () => Promise.resolve()
 };
-async function f(e) {
+async function I(e) {
   const t = e.openTelemetry;
   if (!t) return;
   const r = typeof t == "boolean" ? { enabled: t } : t;
@@ -64,21 +64,21 @@ async function f(e) {
   }), u = new o.WebTracerProvider({
     resource: T,
     spanProcessors: [
-      ...g() ? [A] : [],
+      ...g() ? [E] : [],
       new o.BatchSpanProcessor(
         w
       )
     ]
-  }), m = C(e), d = [
+  }), m = O(e), d = [
     new RegExp(
-      E(e.endpoint) + "/v1/rum/"
+      C(e.endpoint) + "/v1/rum/"
     )
   ];
   u.register({
     contextManager: new a.ZoneContextManager(),
     propagator: new c.W3CTraceContextPropagator()
-  }), U(n.trace, n.context);
-  const y = l.getWebAutoInstrumentations(
+  }), U(n.trace, n.context), h();
+  const b = l.getWebAutoInstrumentations(
     {
       "@opentelemetry/instrumentation-fetch": {
         propagateTraceHeaderCorsUrls: m,
@@ -91,22 +91,22 @@ async function f(e) {
       "@opentelemetry/instrumentation-user-interaction": { enabled: !1 },
       "@opentelemetry/instrumentation-document-load": { enabled: !1 }
     }
-  ), { registerInstrumentations: b } = await import("@opentelemetry/instrumentation");
-  b({
-    instrumentations: y,
+  ), { registerInstrumentations: y } = await import("@opentelemetry/instrumentation");
+  y({
+    instrumentations: b,
     tracerProvider: u
   }), console.debug(
     "[@oodle-ai/rum] OpenTelemetry tracing initialized, exporting to:",
     p
   );
 }
-function E(e) {
+function C(e) {
   return e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function C(e) {
+function O(e) {
   return e.allowedTracingUrls && e.allowedTracingUrls.length > 0 ? e.allowedTracingUrls : [/.*/];
 }
 export {
-  f as initOtelTracing,
-  A as urlMaskingProcessor
+  I as initOtelTracing,
+  E as urlMaskingProcessor
 };

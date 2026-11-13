@@ -195,6 +195,66 @@ describe('privacy options on events', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it('records an Error logged to the console by name and message', () => {
+    console.error = () => {};
+    faro.initEvents();
+    console.error('save failed:', new TypeError('bad input'));
+    console.error(new Error(''));
+    // Not an Error, but shaped like one (another realm, a DOMException).
+    console.error({ name: 'AbortError', message: 'aborted', stack: '' });
+    expect(consoleEvents().map((e) => e.console_message)).toEqual([
+      'save failed: TypeError: bad input',
+      'Error',
+      'AbortError: aborted',
+    ]);
+  });
+
+  it('records rejections after the listener moves to a patched addEventListener', () => {
+    // Stands in for zone.js: once it loads, only listeners added
+    // through its addEventListener hear about rejections.
+    faro.initEvents();
+    const nativeAdd = window.addEventListener;
+    const nativeRemove = window.removeEventListener;
+    const zoneListeners: EventListener[] = [];
+    const removed: unknown[] = [];
+    window.addEventListener = ((type: string, l: any, o?: any) => {
+      if (type === 'unhandledrejection') zoneListeners.push(l);
+      return nativeAdd.call(window, type, l, o);
+    }) as any;
+    window.removeEventListener = ((type: string, l: any, o?: any) => {
+      if (type === 'unhandledrejection') removed.push(l);
+      return nativeRemove.call(window, type, l, o);
+    }) as any;
+    try {
+      faro.reattachRejectionListener();
+    } finally {
+      window.addEventListener = nativeAdd;
+      window.removeEventListener = nativeRemove;
+    }
+    expect(zoneListeners).toHaveLength(1);
+    // The native registration was removed first, so one event
+    // is recorded once.
+    expect(removed).toEqual(zoneListeners);
+    const ev = new Event('unhandledrejection') as any;
+    ev.reason = new RangeError('boom');
+    window.dispatchEvent(ev);
+    const errors = enqueued.filter((e) => e.event_type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      error_type: 'RangeError',
+      error_message: 'boom',
+      error_source: 'promise',
+    });
+  });
+
+  it('does nothing on reattach after the SDK stopped', () => {
+    faro.initEvents();
+    faro.destroyEvents();
+    const add = vi.spyOn(window, 'addEventListener');
+    faro.reattachRejectionListener();
+    expect(add).not.toHaveBeenCalledWith('unhandledrejection', expect.anything());
+  });
+
   it('records both console levels by default', () => {
     console.error = () => {};
     console.warn = () => {};

@@ -359,6 +359,7 @@ function initErrorTracking() {
     'unhandledrejection',
     onUnhandledRejection,
   );
+  rejectionListener = onUnhandledRejection;
 
   teardownFns.push(() => {
     window.removeEventListener('error', onError);
@@ -366,7 +367,52 @@ function initErrorTracking() {
       'unhandledrejection',
       onUnhandledRejection,
     );
+    rejectionListener = null;
   });
+}
+
+let rejectionListener:
+  | ((event: PromiseRejectionEvent) => void)
+  | null = null;
+
+/**
+ * Registers the unhandled-rejection listener again. Called
+ * once zone.js has loaded (browser tracing).
+ *
+ * zone.js replaces the global Promise. A rejected zone
+ * promise never fires the browser's own `unhandledrejection`:
+ * zone.js calls only the listeners added through its patched
+ * `addEventListener`, and ours was added before zone.js
+ * loaded, so every such rejection went unrecorded. Removing
+ * it first matters: promises that zone.js does not own, such
+ * as those async functions return, still fire the native
+ * event, and two registrations would record them twice.
+ */
+export function reattachRejectionListener() {
+  if (!rejectionListener || typeof window === 'undefined') {
+    return;
+  }
+  window.removeEventListener(
+    'unhandledrejection',
+    rejectionListener,
+  );
+  window.addEventListener(
+    'unhandledrejection',
+    rejectionListener,
+  );
+}
+
+function isErrorLike(
+  v: unknown,
+): v is { name: string; message: string } {
+  return (
+    v instanceof Error ||
+    (typeof v === 'object' &&
+      v !== null &&
+      typeof (v as any).message === 'string' &&
+      typeof (v as any).name === 'string' &&
+      'stack' in v)
+  );
 }
 
 /**
@@ -394,6 +440,14 @@ function describeOversized(value: unknown): string {
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
+  // JSON.stringify(new Error('x')) is '{}': name, message and
+  // stack are not own enumerable properties. console.error(err)
+  // is the most common way apps log errors.
+  if (isErrorLike(value)) {
+    return value.message
+      ? `${value.name}: ${value.message}`
+      : value.name;
+  }
   // Measure before serialising. Truncating the result still
   // means building the whole string first, and the argument
   // that motivated this — an rrweb mutation batch, logged

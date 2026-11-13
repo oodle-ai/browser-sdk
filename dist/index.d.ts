@@ -1,4 +1,4 @@
-import { type OodleRumConfig, type OtelConfig } from './core/config';
+import { type NetworkCapture, type OodleRumConfig, type RumEvent, type OtelConfig } from './core/config';
 import { type UserInfo } from './core/user';
 export declare const OodleRum: {
     init(config: OodleRumConfig): void;
@@ -11,4 +11,4 @@ export declare const OodleRum: {
     flush(): void;
     stop(): void;
 };
-export type { OodleRumConfig, OtelConfig, UserInfo, };
+export type { NetworkCapture, OodleRumConfig, RumEvent, OtelConfig, UserInfo, };

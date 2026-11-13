@@ -149,6 +149,52 @@ describe('privacy options on events', () => {
     });
   });
 
+  it('lets beforeSend change an event', () => {
+    config.beforeSend = (e: any) => {
+      e.view_url_path = '/redacted';
+      e.session_id = 'forged';
+    };
+    try {
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued[0].view_url_path).toBe('/redacted');
+    // The event's identity cannot be changed.
+    expect(enqueued[0].session_id).toBe('session-1');
+    expect(enqueued[0].event_type).toBe('view');
+  });
+
+  it('lets beforeSend replace or drop an event', () => {
+    config.beforeSend = (e: any) =>
+      e.event_type === 'custom' ? null : { ...e, extra: 1 };
+    try {
+      faro.trackCustomEvent('x');
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ event_type: 'view', extra: 1 });
+  });
+
+  it('drops the event when beforeSend throws, and warns once', () => {
+    const warn = vi.fn();
+    console.warn = warn;
+    config.beforeSend = () => {
+      throw new Error('boom');
+    };
+    try {
+      faro.initEvents();
+      faro.trackPageView();
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
   it('records both console levels by default', () => {
     console.error = () => {};
     console.warn = () => {};

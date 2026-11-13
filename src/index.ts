@@ -1,5 +1,7 @@
 import {
+  type NetworkCapture,
   type OodleRumConfig,
+  type RumEvent,
   type OtelConfig,
   setConfig,
   getConfig,
@@ -251,20 +253,25 @@ function setupClickTracking():
     if (!target) return;
 
     const selector = getSelector(target);
-    const masked = isActionTextMasked(target);
-    const text = masked
-      ? ''
-      : (target.textContent ?? '')
-          .trim()
-          .slice(0, 200);
     const tagName =
       target.tagName?.toLowerCase() ?? '';
-    const targetName = getTargetName(
-      target,
-      tagName,
-      text,
-      masked,
-    );
+    // A name the app chose for the element (or an ancestor)
+    // wins over its text, and is sent even when text is
+    // masked: it was written to be sent.
+    const chosenName = getChosenActionName(target);
+    const masked =
+      chosenName === null && isActionTextMasked(target);
+    const text =
+      chosenName ??
+      (masked
+        ? ''
+        : (target.textContent ?? '')
+            .trim()
+            .slice(0, 200));
+    const targetName =
+      chosenName !== null
+        ? `${tagName}[${chosenName}]`
+        : getTargetName(target, tagName, text, masked);
     const now = Date.now();
     const clickX = (e as MouseEvent).clientX;
     const clickY = (e as MouseEvent).clientY;
@@ -389,6 +396,21 @@ function setupClickTracking():
   };
 }
 
+const ACTION_NAME_ATTR = 'data-oodle-action-name';
+
+function getChosenActionName(el: HTMLElement): string | null {
+  try {
+    const named =
+      typeof el.closest === 'function'
+        ? el.closest(`[${ACTION_NAME_ATTR}]`)
+        : null;
+    const v = named?.getAttribute(ACTION_NAME_ATTR)?.trim();
+    return v ? v.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
 function getTargetName(
   el: HTMLElement,
   tagName: string,
@@ -439,7 +461,9 @@ function getSelector(el: HTMLElement): string {
 }
 
 export type {
+  NetworkCapture,
   OodleRumConfig,
+  RumEvent,
   OtelConfig,
   UserInfo,
 };

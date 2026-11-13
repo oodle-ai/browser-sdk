@@ -9,6 +9,8 @@ import {
 import { getConfig } from '../core/config';
 import type {
   NetworkBodiesConfig,
+  NetworkCapture,
+  RumEvent,
   NetworkHeadersConfig,
 } from '../core/config';
 import {
@@ -31,6 +33,12 @@ import {
   isServerRateLimited,
 } from '../core/transport';
 import { estimateJsonBytes } from '../core/size';
+import {
+  isBuiltInSensitiveHeader,
+  makeKeyMatcher,
+  redactBody,
+  type KeyMatcher,
+} from '../core/redact';
 import {
   consoleLevels,
   maskPath,
@@ -192,6 +200,49 @@ function scheduleIdleWork(fn: () => void) {
 
 const EVENTS_BATCH_KEY = 'events';
 
+/** Fields beforeSend cannot change: the event's identity. */
+const FIXED_FIELDS = ['session_id', 'event_type', 'timestamp'];
+let warnedBeforeSend = false;
+
+/**
+ * Runs the app's `beforeSend` on a finished event. Returns
+ * the event to send, or null to drop it. Fails closed: an
+ * event whose hook throws is dropped, because the hook may
+ * exist to remove something that must not be sent.
+ */
+export function applyBeforeSend(
+  event: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const hook = getConfig().beforeSend;
+  if (typeof hook !== 'function') return event;
+  const fixed: Record<string, unknown> = {};
+  for (const f of FIXED_FIELDS) fixed[f] = event[f];
+  let r: unknown;
+  try {
+    r = hook(event as RumEvent);
+  } catch (e) {
+    if (!warnedBeforeSend) {
+      warnedBeforeSend = true;
+      // The original, not console.warn: the SDK's own console
+      // capture would turn this into an event, which would run
+      // the same failing hook.
+      (originalConsoleWarn ?? console.warn).call(
+        console,
+        '[@oodle-ai/rum] beforeSend threw. Events are dropped' +
+          ` until it is fixed: ${String(e)}`,
+      );
+    }
+    return null;
+  }
+  if (r === null || r === false) return null;
+  const out =
+    r && typeof r === 'object'
+      ? (r as Record<string, unknown>)
+      : event;
+  for (const f of FIXED_FIELDS) out[f] = fixed[f];
+  return out;
+}
+
 function emitEvent(
   buildData: () => Record<string, unknown>,
 ) {
@@ -201,12 +252,15 @@ function emitEvent(
   const eventType =
     data.event_type as string;
   if (isRateLimited(eventType)) return;
+  if (eventType === 'resource') applyNetworkHook(data);
+  // Counted before the context is built, as before
+  // beforeSend existed, so the session counts on an event
+  // include it. An event beforeSend drops still happened, so
+  // it still counts.
   incrementSessionCount(eventType);
-  const ctx = baseContext();
-  enqueue(
-    EVENTS_BATCH_KEY,
-    { ...ctx, ...data },
-  );
+  const event = applyBeforeSend({ ...baseContext(), ...data });
+  if (!event) return;
+  enqueue(EVENTS_BATCH_KEY, event);
 }
 
 function emitEventDeferred(
@@ -227,6 +281,8 @@ function emitViewEvent(
     data.event_type as string;
   incrementSessionCount(eventType);
   const ctx = baseContext();
+  const event = applyBeforeSend({ ...ctx, ...data });
+  if (!event) return;
   // One row per page load, so the key is the path and not
   // view_url. Each update replaces the whole row, so view_url is
   // the URL at the last metric: a record the user opened after the
@@ -236,11 +292,7 @@ function emitViewEvent(
     (ctx.session_id as string) +
     ':' +
     ctx.view_url_path;
-  upsert(
-    EVENTS_BATCH_KEY,
-    viewId,
-    { ...ctx, ...data },
-  );
+  upsert(EVENTS_BATCH_KEY, viewId, event);
 }
 
 export function initEvents() {
@@ -375,7 +427,11 @@ function consoleMessage(args: unknown[]): string {
     : out;
 }
 
+/** console.warn as it was before the SDK wrapped it. */
+let originalConsoleWarn: typeof console.warn | null = null;
+
 function initConsoleTracking() {
+  originalConsoleWarn = console.warn;
   // A level that is not recorded is not wrapped either, so
   // its calls cost the app nothing.
   for (const level of consoleLevels()) {
@@ -786,13 +842,172 @@ function resolveUrlDecisions(
   };
 }
 
-const SENSITIVE_HEADERS = new Set([
-  'authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'proxy-authorization',
-]);
+let redactCacheFor: unknown = null;
+let redactNames = new Set<string>();
+let redactPatterns: RegExp[] = [];
+
+/**
+ * Whether a header must not be sent: the built-in list plus
+ * the app's `redactHeaders`. The parsed option is cached per
+ * config value, since this runs for every captured header.
+ */
+function isSensitiveHeader(lowerName: string): boolean {
+  if (isBuiltInSensitiveHeader(lowerName)) return true;
+  const extra = getConfig().redactHeaders;
+  if (!extra) return false;
+  if (extra !== redactCacheFor) {
+    redactCacheFor = extra;
+    redactNames = new Set();
+    redactPatterns = [];
+    if (Array.isArray(extra)) {
+      for (const e of extra) {
+        if (typeof e === 'string') {
+          redactNames.add(e.toLowerCase());
+        } else if (e instanceof RegExp) {
+          redactPatterns.push(e);
+        }
+      }
+    }
+  }
+  if (redactNames.has(lowerName)) return true;
+  for (const re of redactPatterns) {
+    re.lastIndex = 0;
+    if (re.test(lowerName)) return true;
+  }
+  return false;
+}
+
+/**
+ * Header names as they are sent: lowercase, without the
+ * sensitive ones.
+ */
+function redactHeaders(
+  h: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of Object.keys(h)) {
+    const lk = k.toLowerCase();
+    if (!isSensitiveHeader(lk)) out[lk] = h[k];
+  }
+  return out;
+}
+
+const CAPTURE_FIELDS = [
+  'request_headers',
+  'response_headers',
+  'request_body',
+  'response_body',
+] as const;
+
+let warnedNetworkHook = false;
+
+function parseHeaderJson(
+  s: unknown,
+): Record<string, string> | undefined {
+  if (typeof s !== 'string' || !s) return undefined;
+  try {
+    const v = JSON.parse(s);
+    return v && typeof v === 'object' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function headerJson(h: unknown): string {
+  if (!h || typeof h !== 'object') return '';
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(h)) {
+    if (v === undefined || v === null) continue;
+    out[k.toLowerCase()] = String(v);
+  }
+  return Object.keys(out).length > 0
+    ? JSON.stringify(out)
+    : '';
+}
+
+/**
+ * Runs `beforeSendNetwork` on the headers and bodies a
+ * resource event captured. Only events that captured
+ * something reach the hook, so a page without
+ * `forwardNetworkHeaders` / `forwardNetworkBodies` never
+ * pays for it. Fails closed: if the hook throws, the
+ * captured headers and bodies are dropped and the timing
+ * event is sent without them.
+ */
+let bodyKeysFor: unknown = null;
+let bodyKeyMatcher: KeyMatcher = makeKeyMatcher(undefined);
+
+function sensitiveBodyKey(): KeyMatcher {
+  const extra = getConfig().redactBodyKeys;
+  if (extra !== bodyKeysFor) {
+    bodyKeysFor = extra;
+    bodyKeyMatcher = makeKeyMatcher(extra);
+  }
+  return bodyKeyMatcher;
+}
+
+export function applyNetworkHook(
+  d: Record<string, unknown>,
+): void {
+  if (!CAPTURE_FIELDS.some((f) => d[f])) return;
+  // Built-in redaction first, so neither hook ever sees the
+  // values it removes.
+  for (const f of ['request_body', 'response_body'] as const) {
+    if (typeof d[f] === 'string' && d[f]) {
+      d[f] = redactBody(d[f] as string, sensitiveBodyKey());
+    }
+  }
+  const hook = getConfig().beforeSendNetwork;
+  if (typeof hook !== 'function') return;
+  const capture: NetworkCapture = {
+    url: String(d.resource_url ?? ''),
+    method: String(d.resource_method ?? ''),
+    status: Number(d.resource_status ?? 0),
+    requestHeaders: parseHeaderJson(d.request_headers),
+    responseHeaders: parseHeaderJson(d.response_headers),
+    requestBody:
+      typeof d.request_body === 'string'
+        ? d.request_body
+        : undefined,
+    responseBody:
+      typeof d.response_body === 'string'
+        ? d.response_body
+        : undefined,
+  };
+  let out: NetworkCapture | null | void;
+  try {
+    const r = hook(capture);
+    out = r === undefined ? capture : r;
+  } catch (e) {
+    if (!warnedNetworkHook) {
+      warnedNetworkHook = true;
+      console.warn(
+        '[@oodle-ai/rum] beforeSendNetwork threw. Captured' +
+          ' headers and bodies are dropped until it is' +
+          ` fixed: ${String(e)}`,
+      );
+    }
+    out = null;
+  }
+  for (const f of CAPTURE_FIELDS) delete d[f];
+  if (!out || typeof out !== 'object') return;
+  const max =
+    getConfig().forwardNetworkBodies?.maxBodySize ??
+    65536;
+  const reqH = headerJson(out.requestHeaders);
+  const resH = headerJson(out.responseHeaders);
+  if (reqH) d.request_headers = reqH;
+  if (resH) d.response_headers = resH;
+  if (typeof out.requestBody === 'string' && out.requestBody) {
+    d.request_body = truncateBody(out.requestBody, max);
+  }
+  if (
+    typeof out.responseBody === 'string' &&
+    out.responseBody
+  ) {
+    d.response_body = truncateBody(out.responseBody, max);
+  }
+}
 
 function headersToRecord(
   h:
@@ -809,14 +1024,14 @@ function headersToRecord(
   ) {
     (h as Headers).forEach((v, k) => {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = v;
       }
     });
   } else if (Array.isArray(h)) {
     for (const [k, v] of h) {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = v;
       }
     }
@@ -825,7 +1040,7 @@ function headersToRecord(
       h as Record<string, string>,
     )) {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = (
           h as Record<string, string>
         )[k];
@@ -847,7 +1062,7 @@ function parseRawHeaders(
       .slice(0, idx)
       .trim()
       .toLowerCase();
-    if (SENSITIVE_HEADERS.has(k)) continue;
+    if (isSensitiveHeader(k)) continue;
     out[k] = line.slice(idx + 1).trim();
   }
   return out;
@@ -1309,11 +1524,11 @@ function wrapXHR(
       try {
         const hdrs =
           (this as any).__oodleReqHeaders;
-        if (
-          hdrs &&
-          Object.keys(hdrs).length > 0
-        ) {
-          reqHdrsJson = JSON.stringify(hdrs);
+        // Recorded raw by setRequestHeader, so they get
+        // the same redaction as fetch headers here.
+        const kept = hdrs ? redactHeaders(hdrs) : {};
+        if (Object.keys(kept).length > 0) {
+          reqHdrsJson = JSON.stringify(kept);
         }
       } catch {}
     }

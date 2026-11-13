@@ -102,8 +102,14 @@ OodleRum.trackEvent('checkout_completed', {
 | `userAgent` | `'full' \| 'none'` | `'full'` | `'none'` sends `user_agent` empty. `browser_name`, `os_name` and `device_type` are still sent |
 | `stripQueryStrings` | `'events' \| 'all'` | `'events'` | `'all'` also removes query strings from the replay page URL and span `url.full`. See [Query strings](#query-strings) |
 | `userInfo` | `'full' \| 'id' \| 'none'` | `'full'` | Which `identify()` fields are sent on events. See [User identification](#user-identification) |
+| `beforeSend` | `(event) => event \| null \| false \| void` | `undefined` | Change or drop any event before it is sent. See [Changing or dropping events](#changing-or-dropping-events) |
 | `openTelemetry` | `boolean \| object` | `undefined` | Send browser traces for fetch and XHR calls. See [Browser tracing](#browser-tracing) |
 | `allowedTracingUrls` | `(string \| RegExp)[]` | all URLs | URLs that get the `traceparent` header |
+| `forwardNetworkHeaders` | `{ urls }` | `undefined` | Capture request and response headers for matching URLs. See [Network headers and bodies](#network-headers-and-bodies) |
+| `forwardNetworkBodies` | `{ urls, maxBodySize? }` | `undefined` | Capture request and response bodies for matching URLs, up to `maxBodySize` characters (default 65536) |
+| `redactHeaders` | `(string \| RegExp)[]` | `undefined` | More header names never sent, on top of the built-in list |
+| `redactBodyKeys` | `(string \| RegExp)[]` | `undefined` | More JSON or form body keys whose values are replaced, on top of the built-in list |
+| `beforeSendNetwork` | `(capture) => capture \| null \| void` | `undefined` | Change or remove captured headers and bodies before they are sent |
 
 ## Browser tracing
 
@@ -143,6 +149,8 @@ SDK sends the same data as before until you set one.
 | Clicked element text, `aria-label`, `title` | Sent, except under `privacyLevel: 'mask'` or inside masked elements | `actionText` |
 | User agent string | Sent | `userAgent` |
 | User name and email from `identify()` | Sent on every event | `userInfo` |
+| Request and response headers and bodies | Not captured unless `forwardNetworkHeaders` / `forwardNetworkBodies` is set. Credential, session and client IP headers, and sensitive body fields, are never sent | `redactHeaders`, `redactBodyKeys`, `beforeSendNetwork` |
+| Anything else in an event | Sent | `beforeSend` |
 
 A configuration that sends as little as possible:
 
@@ -158,6 +166,8 @@ OodleRum.init({
   userAgent: 'none',
   stripQueryStrings: 'all',
   userInfo: 'id',
+  // Only if forwardNetworkHeaders or forwardNetworkBodies is set:
+  beforeSendNetwork: () => null,
 });
 ```
 
@@ -232,6 +242,15 @@ This is the default under `privacyLevel: 'mask'`. Elements marked to be
 masked or hidden in replay (`data-oodle-privacy`, `.oodle-privacy-*`,
 `.rr-mask`, `.rr-block`) never have their text sent, whatever the setting.
 
+To give an element a name of your choice, set `data-oodle-action-name` on
+it or on an ancestor. The name is sent instead of the element's text, even
+when text is masked, because you wrote it to be sent:
+
+```html
+<button data-oodle-action-name="Delete table">Delete table salaries</button>
+<!-- Sent as button[Delete table] -->
+```
+
 ### Query strings
 
 The SDK removes the query string from `view_url`, `referrer_url` and
@@ -261,6 +280,111 @@ record a page shows, list its name in `viewUrlQueryParams`:
 - Parameters after `#` in hash-based routes are not kept.
 - A value that is not an array of strings is ignored, with a console
   warning.
+
+### Network headers and bodies
+
+Headers and bodies are captured only for the URLs listed in
+`forwardNetworkHeaders` and `forwardNetworkBodies`. They often hold
+personal data, such as the end user's IP address in a proxy header or
+in a JSON response, so check what an API returns before you list it.
+
+These headers are never sent, whatever the settings:
+
+- Credentials: `authorization`, `proxy-authorization`, `cookie`,
+  `set-cookie`, `x-api-key`
+- Client IP addresses: `forwarded`, `x-forwarded-for`,
+  `x-original-forwarded-for`, `x-real-ip`, `x-client-ip`,
+  `x-cluster-client-ip`, `cf-connecting-ip`, `true-client-ip`,
+  `fastly-client-ip`
+- Any header whose name contains `token`, `secret`, `auth`, `cookie`,
+  `passw`, `api-key`, `apikey`, `access-key`, `session`, `csrf`, `xsrf`,
+  `client-ip`, `real-ip` or `forwarded`, such as `x-auth-token`,
+  `x-csrf-token` or `x-session-id`
+
+In captured bodies, the values of these keys are replaced with
+`[REDACTED]`, at any depth in JSON and in form-encoded bodies:
+
+- Keys whose name contains `passw`, `secret`, `token`, `apikey`,
+  `accesskey`, `privatekey`, `authorization`, `credential`, `cardnumber`,
+  `creditcard`, `cvv`, `cvc`, `securitycode`, `socialsecurity`, `ipaddr`,
+  `clientip`, `remoteaddr` or `remoteip`, and the keys `ip`, `ipv4`,
+  `ipv6`, `ssn` and `pan`. Case, `-`, `_` and `.` are ignored, so
+  `access_token`, `ipAddress` and `card-number` all match.
+- Payment card numbers anywhere in a body, found by their checksum.
+
+Built-in redaction runs before `beforeSendNetwork` and `beforeSend`, so
+neither hook sees the removed values.
+
+To keep more headers out, list them in `redactHeaders`. A string matches
+the whole name, ignoring case, and a RegExp is tested against the
+lowercase name:
+
+```javascript
+redactHeaders: ['x-debug-client-ip', /^x-internal-/],
+```
+
+To redact more body fields, list their keys in `redactBodyKeys`. A string
+matches the whole key, ignoring case, `-`, `_` and `.`, and a RegExp is
+tested against the key as written:
+
+```javascript
+redactBodyKeys: ['email', 'phone', /^salary/],
+```
+
+To change what is sent, set `beforeSendNetwork`. It runs once for each
+request that captured headers or a body. It gets the request's `url` (as
+sent: no query string, path masked), `method`, `status`, and
+`requestHeaders`, `responseHeaders`, `requestBody` and `responseBody`.
+Change the object and return nothing, return a new object, or return
+`null` to send no headers or bodies for that request:
+
+```javascript
+beforeSendNetwork: (capture) => {
+  const ip = /\b\d{1,3}(\.\d{1,3}){3}\b/g;
+  if (capture.responseBody) {
+    capture.responseBody = capture.responseBody.replace(ip, '<ip>');
+  }
+  if (capture.url.endsWith('/auth/token')) return null;
+},
+```
+
+- The request's timing event (URL, method, status, duration) is sent
+  in every case. Only the captured headers and bodies change.
+- `url`, `method` and `status` are for reading. Changes to them are
+  ignored.
+- If the function throws, no headers or bodies are sent for that
+  request, and the SDK logs one console warning.
+- The built-in redaction, `redactHeaders` and `redactBodyKeys` are
+  applied before the function runs, so it never sees those values.
+
+### Changing or dropping events
+
+`beforeSend` is called with every event before it is queued: views,
+actions, errors, console, resources, long tasks, custom events and tab
+visibility. Use it for anything the options above do not cover:
+
+```javascript
+beforeSend: (event) => {
+  // Drop console events from a noisy library.
+  if (event.event_type === 'console' && /\[vendor\]/.test(event.console_message)) {
+    return null;
+  }
+  // Remove a field.
+  delete event.custom_event_properties;
+},
+```
+
+- Change the event and return nothing, return a new object, or return
+  `null` or `false` to drop the event.
+- `session_id`, `event_type` and `timestamp` cannot be changed.
+- If the function throws, the event is dropped and the SDK logs one
+  console warning, so a broken hook does not send what it was meant to
+  remove.
+- It runs after every other option, so it sees events as they would be
+  sent.
+- Session replay data does not pass through it. Use `privacyLevel` and
+  the replay markers for replay.
+- A dropped event still counts in the session's event counts.
 
 ### Session replay
 

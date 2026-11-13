@@ -144,8 +144,10 @@ them while tracing is on.
 
 ## Privacy
 
-Every privacy option below is off by default, except where noted, so the
-SDK sends the same data as before until you set one.
+Some data is always kept out, whatever the settings: query strings in event
+URLs, credential, session and IP address headers and fields in captured
+network data, and the text of elements masked in session replay. The options
+below send less; each one is off by default unless noted.
 
 ### What each option changes
 

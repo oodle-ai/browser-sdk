@@ -39,6 +39,7 @@ import {
   sanitizeResourceUrl,
   sanitizeStack,
   sendUserAgent,
+  userFields,
 } from '../core/privacy';
 import { tryConsume } from '../core/rate-limiter';
 import { incrTelemetry } from '../core/telemetry';
@@ -143,9 +144,11 @@ function baseContext(): Record<string, unknown> {
   const config = getConfig();
   const ctx: Record<string, unknown> = {
     session_id: getSessionId(),
-    user_id: getUserId(),
-    user_name: getUserName(),
-    user_email: getUserEmail(),
+    ...userFields(
+      getUserId(),
+      getUserName(),
+      getUserEmail(),
+    ),
     user_status: getUserStatus(),
     service: config.service,
     env: config.env ?? '',

@@ -1,14 +1,15 @@
 import type { OodleRumConfig } from '../core/config';
 import { setOtelApi } from '../core/otel-bridge';
 import {
-  hasPathMasking,
-  maskUrlPathOnly,
+  rewritesFullUrls,
+  sanitizeSpanUrl,
 } from '../core/privacy';
 
 const URL_ATTRS = ['url.full', 'http.url'];
 
 /**
- * Masks URL paths on spans as they end. Listed ahead of the
+ * Masks URL paths, and with `stripQueryStrings: 'all'` drops
+ * query strings, on spans as they end. Listed ahead of the
  * batch processor, which holds the same span object and
  * reads its attributes only when it exports.
  */
@@ -19,7 +20,7 @@ export const urlMaskingProcessor = {
     for (const key of URL_ATTRS) {
       const v = attrs[key];
       if (typeof v === 'string') {
-        attrs[key] = maskUrlPathOnly(v);
+        attrs[key] = sanitizeSpanUrl(v);
       }
     }
   },
@@ -133,7 +134,7 @@ export async function initOtelTracing(
     new sdkTraceWeb.WebTracerProvider({
       resource,
       spanProcessors: [
-        ...(hasPathMasking()
+        ...(rewritesFullUrls()
           ? [urlMaskingProcessor as any]
           : []),
         new sdkTraceWeb.BatchSpanProcessor(

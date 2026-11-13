@@ -1,6 +1,7 @@
 import type { OodleRumConfig } from '../core/config';
 /**
- * Masks URL paths on spans as they end. Listed ahead of the
+ * Masks URL paths, and with `stripQueryStrings: 'all'` drops
+ * query strings, on spans as they end. Listed ahead of the
  * batch processor, which holds the same span object and
  * reads its attributes only when it exports.
  */

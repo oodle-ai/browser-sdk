@@ -12,6 +12,8 @@ export type ReferrerMode = 'path' | 'origin' | 'none';
 export type MessageMode = 'full' | 'scrub' | 'none';
 export type ActionTextMode = 'full' | 'mask';
 export type UserAgentMode = 'full' | 'none';
+export type QueryStringMode = 'events' | 'all';
+export type UserInfoMode = 'full' | 'id' | 'none';
 export interface PrivacyOptions {
     urlPathPatterns?: readonly string[];
     maskUrlPath?: (path: string) => string;
@@ -20,7 +22,10 @@ export interface PrivacyOptions {
     errorMessages?: MessageMode;
     actionText?: ActionTextMode;
     userAgent?: UserAgentMode;
+    stripQueryStrings?: QueryStringMode;
+    userInfo?: UserInfoMode;
     privacyLevel?: string;
+    viewUrlQueryParams?: readonly string[];
 }
 interface CompiledPattern {
     /** Literal segments, or `:name` for any one segment. */
@@ -57,10 +62,36 @@ export declare function sanitizeResourceUrl(url: string, base?: string): string;
  * not also change what else those fields hold.
  */
 export declare function maskUrlPathOnly(url: string): string;
+/**
+ * Whether the replay page URL and span URLs need rewriting at
+ * all, so callers can skip the work when they do not.
+ */
+export declare function rewritesFullUrls(): boolean;
+/**
+ * The page URL session replay records. With
+ * `stripQueryStrings: 'all'` it matches `view_url`: no
+ * fragment, and only the `viewUrlQueryParams` in the query.
+ */
+export declare function sanitizeReplayUrl(url: string): string;
+/**
+ * A request URL on a span. With `stripQueryStrings: 'all'` it
+ * matches `resource_url`: no query or fragment.
+ */
+export declare function sanitizeSpanUrl(url: string): string;
 export declare function sanitizeReferrer(referrer: string): string;
 export declare function consoleLevels(): readonly ConsoleLevel[];
 export declare function messageMode(): MessageMode;
 export declare function sendUserAgent(): boolean;
+/**
+ * The user fields from identify() as `userInfo` lets them be
+ * sent. `user_status` is not here: whether a user was
+ * identified says nothing about who they are.
+ */
+export declare function userFields(id: string, name: string, email: string): {
+    user_id: string;
+    user_name: string;
+    user_email: string;
+};
 /**
  * Replaces the parts of a message that most often hold data
  * rather than describe the failure: quoted strings, URLs,

@@ -3,7 +3,7 @@ import { getConfig } from '../core/config';
 import {
   BLOCK_SELECTOR,
   MASK_TEXT_SELECTOR,
-  maskUrlPathOnly,
+  sanitizeReplayUrl,
 } from '../core/privacy';
 import {
   getSessionId,
@@ -615,7 +615,7 @@ function handleEvent(event: eventWithTime) {
   if (event.type === META) {
     const data = event.data as { href?: string };
     if (typeof data.href === 'string') {
-      data.href = maskUrlPathOnly(data.href);
+      data.href = sanitizeReplayUrl(data.href);
     }
   }
 

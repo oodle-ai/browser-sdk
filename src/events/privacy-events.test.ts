@@ -37,8 +37,8 @@ vi.mock('../core/session', () => ({
 
 vi.mock('../core/user', () => ({
   getUserId: () => 'u1',
-  getUserName: () => '',
-  getUserEmail: () => '',
+  getUserName: () => 'Jane Doe',
+  getUserEmail: () => 'jane@acme.io',
   getUserStatus: () => 'anonymous',
 }));
 
@@ -130,6 +130,23 @@ describe('privacy options on events', () => {
     faro.trackPageView();
     expect(enqueued[1].user_agent).toBe('');
     expect(enqueued[1].browser_name).toBeTruthy();
+  });
+
+  it('sends only the user id with userInfo id', () => {
+    faro.trackPageView();
+    expect(enqueued[0]).toMatchObject({
+      user_id: 'u1',
+      user_name: 'Jane Doe',
+      user_email: 'jane@acme.io',
+    });
+    privacy.configurePrivacy({ userInfo: 'id' });
+    faro.trackPageView();
+    expect(enqueued[1]).toMatchObject({
+      user_id: 'u1',
+      user_name: '',
+      user_email: '',
+      user_status: 'anonymous',
+    });
   });
 
   it('records both console levels by default', () => {

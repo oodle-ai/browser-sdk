@@ -1,4 +1,4 @@
-import { type ActionTextMode, type ConsoleLevel, type MessageMode, type ReferrerMode, type UserAgentMode } from './privacy';
+import { type ActionTextMode, type ConsoleLevel, type MessageMode, type QueryStringMode, type ReferrerMode, type UserAgentMode, type UserInfoMode } from './privacy';
 export interface NetworkBodiesConfig {
     urls: (string | RegExp)[];
     maxBodySize?: number;
@@ -82,6 +82,19 @@ export interface OodleRumConfig {
      * and `device_type` are still sent. Default `'full'`.
      */
     userAgent?: UserAgentMode;
+    /**
+     * Where query strings are removed. `'events'` (default) removes
+     * them from event fields; the replay page URL and span
+     * `url.full` keep the full URL. `'all'` removes them there too,
+     * keeping only `viewUrlQueryParams` in the replay page URL.
+     */
+    stripQueryStrings?: QueryStringMode;
+    /**
+     * Which `identify()` fields are sent on events: `'full'`
+     * (default) id, name and email; `'id'` the id only; `'none'`
+     * none of them. `user_status` is always sent.
+     */
+    userInfo?: UserInfoMode;
     openTelemetry?: boolean | OtelConfig;
     flushIntervalMs?: number;
     replayFlushIntervalMs?: number;

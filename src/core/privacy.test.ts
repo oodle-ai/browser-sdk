@@ -9,11 +9,15 @@ import {
   resetPrivacy,
   sanitizeMessage,
   sanitizeReferrer,
+  sanitizeReplayUrl,
   sanitizeResourceUrl,
+  sanitizeSpanUrl,
   sanitizeStack,
   scrubMessage,
   sendUserAgent,
+  userFields,
 } from './privacy';
+import { urlMaskingProcessor } from '../otel/tracing';
 
 afterEach(() => {
   resetPrivacy();
@@ -216,8 +220,16 @@ describe('unknown option values fail closed', () => {
       actionText: 'hide' as any,
       userAgent: false as any,
       consoleLevels: 'error' as any,
+      stripQueryStrings: true as any,
+      userInfo: 'email' as any,
     });
-    expect(warn).toHaveBeenCalledTimes(5);
+    expect(warn).toHaveBeenCalledTimes(7);
+    expect(sanitizeReplayUrl('https://a.com/b?t=1')).toBe('https://a.com/b');
+    expect(userFields('u', 'n', 'e')).toEqual({
+      user_id: '',
+      user_name: '',
+      user_email: '',
+    });
     expect(sanitizeReferrer('https://a.com/b')).toBe('');
     expect(sanitizeMessage('x')).toBe('');
     expect(sendUserAgent()).toBe(false);
@@ -338,5 +350,86 @@ describe('isActionTextMasked', () => {
     expect(isActionTextMasked(document.createElement('button'))).toBe(true);
     configurePrivacy({ privacyLevel: 'mask', actionText: 'full' });
     expect(isActionTextMasked(document.createElement('button'))).toBe(false);
+  });
+});
+
+describe('stripQueryStrings', () => {
+  const url = 'https://app.x.com/projects/acme?token=s3cret&traceId=t1#tab';
+
+  it("'events' (default) keeps the replay and span URLs whole", () => {
+    expect(sanitizeReplayUrl(url)).toBe(url);
+    expect(sanitizeSpanUrl(url)).toBe(url);
+  });
+
+  it("'events' still masks their paths", () => {
+    configurePrivacy({ urlPathPatterns: ['/projects/:id'] });
+    expect(sanitizeReplayUrl(url)).toBe(
+      'https://app.x.com/projects/:id?token=s3cret&traceId=t1#tab',
+    );
+  });
+
+  it("'all' makes the replay URL match view_url", () => {
+    configurePrivacy({ stripQueryStrings: 'all' });
+    expect(sanitizeReplayUrl(url)).toBe('https://app.x.com/projects/acme');
+    configurePrivacy({
+      stripQueryStrings: 'all',
+      viewUrlQueryParams: ['traceId'],
+      urlPathPatterns: ['/projects/:id'],
+    });
+    expect(sanitizeReplayUrl(url)).toBe(
+      'https://app.x.com/projects/:id?traceId=t1',
+    );
+  });
+
+  it("'all' drops the query from span URLs", () => {
+    configurePrivacy({
+      stripQueryStrings: 'all',
+      viewUrlQueryParams: ['traceId'],
+    });
+    expect(sanitizeSpanUrl(url)).toBe('https://app.x.com/projects/acme');
+  });
+
+  it('is applied to span url.full by the span processor', () => {
+    configurePrivacy({
+      stripQueryStrings: 'all',
+      urlPathPatterns: ['/api/:x/*'],
+    });
+    const span = {
+      attributes: {
+        'url.full': 'https://h.com/api/acme/rows?token=1',
+        'http.request.method': 'GET',
+      } as Record<string, unknown>,
+    };
+    urlMaskingProcessor.onEnd(span);
+    expect(span.attributes['url.full']).toBe('https://h.com/api/:x/*');
+    expect(span.attributes['http.request.method']).toBe('GET');
+  });
+});
+
+describe('userInfo', () => {
+  it("'full' (default) sends every field", () => {
+    expect(userFields('u1', 'Jane', 'j@x.io')).toEqual({
+      user_id: 'u1',
+      user_name: 'Jane',
+      user_email: 'j@x.io',
+    });
+  });
+
+  it("'id' sends only the id", () => {
+    configurePrivacy({ userInfo: 'id' });
+    expect(userFields('u1', 'Jane', 'j@x.io')).toEqual({
+      user_id: 'u1',
+      user_name: '',
+      user_email: '',
+    });
+  });
+
+  it("'none' sends no field", () => {
+    configurePrivacy({ userInfo: 'none' });
+    expect(userFields('u1', 'Jane', 'j@x.io')).toEqual({
+      user_id: '',
+      user_name: '',
+      user_email: '',
+    });
   });
 });

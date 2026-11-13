@@ -60,6 +60,14 @@ OodleRum.identify({
 });
 ```
 
+The user fields are sent on every event. To send less, set `userInfo`:
+
+- `'full'` (default): `user_id`, `user_name` and `user_email`.
+- `'id'`: `user_id` only. `user_name` and `user_email` are sent empty.
+- `'none'`: none of the three.
+
+`user_status` (`identified` or `anonymous`) is sent in every mode.
+
 ## Custom events
 
 ```javascript
@@ -92,6 +100,8 @@ OodleRum.trackEvent('checkout_completed', {
 | `errorMessages` | `'full' \| 'scrub' \| 'none'` | `'full'` | What error and console messages hold. See [Error and console messages](#error-and-console-messages) |
 | `actionText` | `'full' \| 'mask'` | `'mask'` with `privacyLevel: 'mask'`, else `'full'` | `'mask'` sends no element text with click events |
 | `userAgent` | `'full' \| 'none'` | `'full'` | `'none'` sends `user_agent` empty. `browser_name`, `os_name` and `device_type` are still sent |
+| `stripQueryStrings` | `'events' \| 'all'` | `'events'` | `'all'` also removes query strings from the replay page URL and span `url.full`. See [Query strings](#query-strings) |
+| `userInfo` | `'full' \| 'id' \| 'none'` | `'full'` | Which `identify()` fields are sent on events. See [User identification](#user-identification) |
 | `openTelemetry` | `boolean \| object` | `undefined` | Send browser traces for fetch and XHR calls. See [Browser tracing](#browser-tracing) |
 | `allowedTracingUrls` | `(string \| RegExp)[]` | all URLs | URLs that get the `traceparent` header |
 
@@ -126,12 +136,13 @@ SDK sends the same data as before until you set one.
 | Data | Sent by default | Option to change it |
 |------|-----------------|---------------------|
 | URL paths (`view_url`, `view_url_path`, `referrer_url`, `resource_url`, replay page URL, span `url.full`) | As in the address bar | `urlPathPatterns`, `maskUrlPath` |
-| URL query strings | Dropped, except on the replay page URL and span `url.full` | `viewUrlQueryParams` |
+| URL query strings | Dropped, except on the replay page URL and span `url.full` | `stripQueryStrings`, `viewUrlQueryParams` |
 | Referrer | Origin and path | `referrerUrl` |
 | Console output | `console.error` and `console.warn` | `consoleLevels` |
 | Error and console messages | As written | `errorMessages` |
 | Clicked element text, `aria-label`, `title` | Sent, except under `privacyLevel: 'mask'` or inside masked elements | `actionText` |
 | User agent string | Sent | `userAgent` |
+| User name and email from `identify()` | Sent on every event | `userInfo` |
 
 A configuration that sends as little as possible:
 
@@ -145,6 +156,8 @@ OodleRum.init({
   errorMessages: 'none',
   actionText: 'mask',
   userAgent: 'none',
+  stripQueryStrings: 'all',
+  userInfo: 'id',
 });
 ```
 
@@ -186,8 +199,8 @@ maskUrlPath: (path) => path.replace(/\/users\/[^/]+/, '/users/:id'),
 If `maskUrlPath` throws or returns something other than a string, the path is
 sent as `/:redacted`.
 
-The replay page URL and span `url.full` keep their query strings. Path
-masking changes only their paths.
+Path masking changes only the path of the replay page URL and span
+`url.full`. To remove their query strings too, set `stripQueryStrings: 'all'`.
 
 ### Error and console messages
 
@@ -223,9 +236,13 @@ masked or hidden in replay (`data-oodle-privacy`, `.oodle-privacy-*`,
 
 The SDK removes the query string from `view_url`, `referrer_url` and
 `resource_url`, because a query string can hold tokens or personal data.
-Two places keep the full query string: the page URL that session replay
-records, and the `url.full` attribute on browser trace spans. Keep secrets
-out of URLs, or turn off `sessionReplay` for pages that have them in the URL.
+By default, two places keep the full query string: the page URL that
+session replay records, and the `url.full` attribute on browser trace spans.
+Set `stripQueryStrings: 'all'` to remove it there too:
+
+- The replay page URL then matches `view_url`: only the parameters in
+  `viewUrlQueryParams` are kept, and the `#` fragment is dropped.
+- Span `url.full` then matches `resource_url`: no query string or fragment.
 
 To keep a parameter that only identifies page state, such as the ID of the
 record a page shows, list its name in `viewUrlQueryParams`:

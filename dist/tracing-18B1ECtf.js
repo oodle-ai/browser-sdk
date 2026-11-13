@@ -1,10 +1,10 @@
-import { h, s as x, m as P } from "./index-BbmIMEK7.js";
-const U = ["url.full", "http.url"], A = {
+import { r as g, s as U, a as P } from "./index-2KRGD3OT.js";
+const h = ["url.full", "http.url"], A = {
   onStart() {
   },
   onEnd(e) {
     const t = e.attributes;
-    for (const r of U) {
+    for (const r of h) {
       const o = t[r];
       typeof o == "string" && (t[r] = P(o));
     }
@@ -36,10 +36,10 @@ async function f(e) {
       import("@opentelemetry/core"),
       import("@opentelemetry/api")
     ]);
-  } catch (g) {
+  } catch (x) {
     console.warn(
       "[@oodle-ai/rum] Failed to load OpenTelemetry. Browser tracing is off:",
-      g
+      x
     );
     return;
   }
@@ -55,7 +55,7 @@ async function f(e) {
     ...r.customAttributes || {}
   }, T = i.resourceFromAttributes(
     v
-  ), y = new s.OTLPTraceExporter({
+  ), w = new s.OTLPTraceExporter({
     url: p,
     headers: {
       "X-OODLE-INSTANCE": e.instanceId,
@@ -64,12 +64,12 @@ async function f(e) {
   }), u = new o.WebTracerProvider({
     resource: T,
     spanProcessors: [
-      ...h() ? [A] : [],
+      ...g() ? [A] : [],
       new o.BatchSpanProcessor(
-        y
+        w
       )
     ]
-  }), m = O(e), d = [
+  }), m = C(e), d = [
     new RegExp(
       E(e.endpoint) + "/v1/rum/"
     )
@@ -77,8 +77,8 @@ async function f(e) {
   u.register({
     contextManager: new a.ZoneContextManager(),
     propagator: new c.W3CTraceContextPropagator()
-  }), x(n.trace, n.context);
-  const w = l.getWebAutoInstrumentations(
+  }), U(n.trace, n.context);
+  const y = l.getWebAutoInstrumentations(
     {
       "@opentelemetry/instrumentation-fetch": {
         propagateTraceHeaderCorsUrls: m,
@@ -93,7 +93,7 @@ async function f(e) {
     }
   ), { registerInstrumentations: b } = await import("@opentelemetry/instrumentation");
   b({
-    instrumentations: w,
+    instrumentations: y,
     tracerProvider: u
   }), console.debug(
     "[@oodle-ai/rum] OpenTelemetry tracing initialized, exporting to:",
@@ -103,7 +103,7 @@ async function f(e) {
 function E(e) {
   return e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function O(e) {
+function C(e) {
   return e.allowedTracingUrls && e.allowedTracingUrls.length > 0 ? e.allowedTracingUrls : [/.*/];
 }
 export {

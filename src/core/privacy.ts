@@ -13,6 +13,8 @@ export type ReferrerMode = 'path' | 'origin' | 'none';
 export type MessageMode = 'full' | 'scrub' | 'none';
 export type ActionTextMode = 'full' | 'mask';
 export type UserAgentMode = 'full' | 'none';
+export type QueryStringMode = 'events' | 'all';
+export type UserInfoMode = 'full' | 'id' | 'none';
 
 export interface PrivacyOptions {
   urlPathPatterns?: readonly string[];
@@ -22,7 +24,10 @@ export interface PrivacyOptions {
   errorMessages?: MessageMode;
   actionText?: ActionTextMode;
   userAgent?: UserAgentMode;
+  stripQueryStrings?: QueryStringMode;
+  userInfo?: UserInfoMode;
   privacyLevel?: string;
+  viewUrlQueryParams?: readonly string[];
 }
 
 interface CompiledPattern {
@@ -40,6 +45,9 @@ interface PrivacyState {
   messages: MessageMode;
   actionText: ActionTextMode;
   userAgent: UserAgentMode;
+  queryStrings: QueryStringMode;
+  userInfo: UserInfoMode;
+  keepParams: readonly string[];
 }
 
 const ALL_CONSOLE_LEVELS: readonly ConsoleLevel[] = [
@@ -56,6 +64,9 @@ function defaults(): PrivacyState {
     messages: 'full',
     actionText: 'full',
     userAgent: 'full',
+    queryStrings: 'events',
+    userInfo: 'full',
+    keepParams: [],
   };
 }
 
@@ -224,6 +235,23 @@ export function configurePrivacy(
       'full',
       'none',
     ),
+    queryStrings: pickMode(
+      'stripQueryStrings',
+      opts.stripQueryStrings,
+      ['events', 'all'] as const,
+      'events',
+      'all',
+    ),
+    userInfo: pickMode(
+      'userInfo',
+      opts.userInfo,
+      ['full', 'id', 'none'] as const,
+      'full',
+      'none',
+    ),
+    keepParams: Array.isArray(opts.viewUrlQueryParams)
+      ? opts.viewUrlQueryParams
+      : [],
   };
 }
 
@@ -368,6 +396,51 @@ export function maskUrlPathOnly(url: string): string {
   if (!hasPathMasking() || typeof url !== 'string') {
     return url;
   }
+  return rewriteUrl(url, (u) => u.search + u.hash);
+}
+
+/**
+ * Whether the replay page URL and span URLs need rewriting at
+ * all, so callers can skip the work when they do not.
+ */
+export function rewritesFullUrls(): boolean {
+  return hasPathMasking() || state.queryStrings === 'all';
+}
+
+/**
+ * The page URL session replay records. With
+ * `stripQueryStrings: 'all'` it matches `view_url`: no
+ * fragment, and only the `viewUrlQueryParams` in the query.
+ */
+export function sanitizeReplayUrl(url: string): string {
+  if (state.queryStrings !== 'all') return maskUrlPathOnly(url);
+  if (typeof url !== 'string') return url;
+  return rewriteUrl(url, (u) => {
+    const keep = state.keepParams;
+    if (keep.length === 0 || !u.search) return '';
+    const kept = new URLSearchParams();
+    u.searchParams.forEach((v, k) => {
+      if (keep.includes(k)) kept.append(k, v);
+    });
+    const q = kept.toString();
+    return q ? '?' + q : '';
+  });
+}
+
+/**
+ * A request URL on a span. With `stripQueryStrings: 'all'` it
+ * matches `resource_url`: no query or fragment.
+ */
+export function sanitizeSpanUrl(url: string): string {
+  if (state.queryStrings !== 'all') return maskUrlPathOnly(url);
+  if (typeof url !== 'string') return url;
+  return rewriteUrl(url, () => '');
+}
+
+function rewriteUrl(
+  url: string,
+  suffix: (u: URL) => string,
+): string {
   let u: URL;
   try {
     u = new URL(url);
@@ -377,7 +450,7 @@ export function maskUrlPathOnly(url: string): string {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     return url;
   }
-  return u.origin + maskPath(u.pathname) + u.search + u.hash;
+  return u.origin + maskPath(u.pathname) + suffix(u);
 }
 
 let referrerCacheKey: string | null = null;
@@ -419,6 +492,26 @@ export function messageMode(): MessageMode {
 
 export function sendUserAgent(): boolean {
   return state.userAgent === 'full';
+}
+
+/**
+ * The user fields from identify() as `userInfo` lets them be
+ * sent. `user_status` is not here: whether a user was
+ * identified says nothing about who they are.
+ */
+export function userFields(
+  id: string,
+  name: string,
+  email: string,
+): { user_id: string; user_name: string; user_email: string } {
+  switch (state.userInfo) {
+    case 'full':
+      return { user_id: id, user_name: name, user_email: email };
+    case 'id':
+      return { user_id: id, user_name: '', user_email: '' };
+    default:
+      return { user_id: '', user_name: '', user_email: '' };
+  }
 }
 
 // --- Message scrubbing ---

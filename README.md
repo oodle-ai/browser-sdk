@@ -110,6 +110,11 @@ OodleRum.trackEvent('checkout_completed', {
 | `redactHeaders` | `(string \| RegExp)[]` | `undefined` | More header names never sent, on top of the built-in list |
 | `redactBodyKeys` | `(string \| RegExp)[]` | `undefined` | More JSON or form body keys whose values are replaced, on top of the built-in list |
 | `beforeSendNetwork` | `(capture) => capture \| null \| void` | `undefined` | Change or remove captured headers and bodies before they are sent |
+| `flushIntervalMs` | `number` | `5000` | How often queued events are sent, in milliseconds |
+| `replayFlushIntervalMs` | `number` | `5000` | How often recorded replay data is sent, in milliseconds |
+| `replayIdlePauseMs` | `number` | `300000` | Replay recording pauses after this long without user activity (5 minutes), and resumes on the next interaction |
+| `replayIdleExpireMs` | `number` | `900000` | After this long without user activity (15 minutes) the replay ends; the next interaction starts a new one |
+| `shouldSendData` | `() => boolean` | `undefined` | Called before each send. While it returns `false`, batches are held (up to 1000, for up to 5 minutes) and retried every 5 seconds. Not checked for the last send when the page is hidden or closed |
 
 ## Browser tracing
 

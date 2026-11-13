@@ -196,6 +196,9 @@ urlPathPatterns: [
 - The first matching pattern wins. A path that matches none is sent unchanged.
 - The patterns apply to the page path and to network request paths, so list
   API routes too.
+- A path that matches no pattern, such as a not-found page or a route added
+  later, is sent unchanged. End each section with a catch-all such as
+  `'/projects/:project/*'` so those paths are masked too.
 - `view_url_path` is masked too, so views of different records group under
   one route.
 

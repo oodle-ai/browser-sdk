@@ -1,6 +1,6 @@
 import type { OodleRumConfig } from '../core/config';
 import { setOtelApi } from '../core/otel-bridge';
-import { reattachRejectionListener } from '../events/faro';
+import { captureZoneRejections } from '../events/faro';
 import {
   rewritesFullUrls,
   sanitizeSpanUrl,
@@ -162,8 +162,8 @@ export async function initOtelTracing(
   setOtelApi(otelApi.trace, otelApi.context);
 
   // Loading context-zone installed zone.js, which replaces the
-  // global Promise; see reattachRejectionListener.
-  reattachRejectionListener();
+  // global Promise; see captureZoneRejections.
+  captureZoneRejections();
 
   const instrumentations =
     autoInstrumentations.getWebAutoInstrumentations(

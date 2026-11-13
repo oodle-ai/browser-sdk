@@ -123,11 +123,14 @@ OodleRum.init({ /* ... */, openTelemetry: true });
 ```
 
 Tracing uses zone.js, which replaces the global `Promise` when tracing
-starts. After that, a rejected promise reaches only the `unhandledrejection`
-listeners added once zone.js has loaded. The SDK moves its own listener
-over, so it keeps recording unhandled rejections. If your app adds an
-`unhandledrejection` listener before `init()`, add it again after tracing
-has started, or add it later in app start-up.
+starts. A rejected promise created after that does not fire the browser's
+`unhandledrejection` event, so no listener for that event hears about it.
+The SDK records these rejections through zone.js's own handler, so RUM still
+gets them. If your app has its own `unhandledrejection` listener, it misses
+them while tracing is on.
+
+`console.error(err)` with an `Error` object is recorded as
+`Name: message`.
 
 ## What's collected
 

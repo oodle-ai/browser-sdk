@@ -334,32 +334,14 @@ function initErrorTracking() {
 
   const onUnhandledRejection = (
     event: PromiseRejectionEvent,
-  ) => {
-    const reason = event.reason;
-    emitEvent(() => {
-      const raw =
-        reason?.message ?? String(reason);
-      return {
-        event_type: 'error',
-        error_message: sanitizeMessage(raw),
-        error_type:
-          reason?.name ??
-          'UnhandledRejection',
-        error_stack: sanitizeStack(
-          reason?.stack ?? '',
-          raw,
-        ),
-        error_source: 'promise',
-      };
-    });
-  };
+  ) => recordRejection(event.reason);
 
   window.addEventListener('error', onError);
   window.addEventListener(
     'unhandledrejection',
     onUnhandledRejection,
   );
-  rejectionListener = onUnhandledRejection;
+  rejectionsActive = true;
 
   teardownFns.push(() => {
     window.removeEventListener('error', onError);
@@ -367,39 +349,67 @@ function initErrorTracking() {
       'unhandledrejection',
       onUnhandledRejection,
     );
-    rejectionListener = null;
+    rejectionsActive = false;
   });
 }
 
-let rejectionListener:
-  | ((event: PromiseRejectionEvent) => void)
-  | null = null;
+let rejectionsActive = false;
+
+function recordRejection(reason: any) {
+  emitEvent(() => {
+    const raw = reason?.message ?? String(reason);
+    return {
+      event_type: 'error',
+      error_message: sanitizeMessage(raw),
+      error_type: reason?.name ?? 'UnhandledRejection',
+      error_stack: sanitizeStack(reason?.stack ?? '', raw),
+      error_source: 'promise',
+    };
+  });
+}
+
+let zoneHooked = false;
 
 /**
- * Registers the unhandled-rejection listener again. Called
- * once zone.js has loaded (browser tracing).
+ * Records rejections of zone.js promises. Called once zone.js
+ * has loaded (browser tracing).
  *
- * zone.js replaces the global Promise. A rejected zone
- * promise never fires the browser's own `unhandledrejection`:
- * zone.js calls only the listeners added through its patched
- * `addEventListener`, and ours was added before zone.js
- * loaded, so every such rejection went unrecorded. Removing
- * it first matters: promises that zone.js does not own, such
- * as those async functions return, still fire the native
- * event, and two registrations would record them twice.
+ * zone.js replaces the global Promise, and the browser fires
+ * no `unhandledrejection` for a promise it did not create.
+ * zone.js's own bridge to that event does not work either: by
+ * default it hands the bare error to a `PromiseRejectionEvent`
+ * constructor, which throws for want of a promise, and the
+ * throw is swallowed. So no listener, however it was added,
+ * hears about these rejections. zone.js does call the handler
+ * in this slot, so the SDK wraps it.
+ *
+ * The native listener stays: promises zone.js does not own,
+ * such as those async functions return, still fire the
+ * browser's event. A rejection takes one path or the other,
+ * so none is recorded twice.
  */
-export function reattachRejectionListener() {
-  if (!rejectionListener || typeof window === 'undefined') {
+export function captureZoneRejections() {
+  const Zone = (globalThis as any).Zone;
+  if (zoneHooked || !Zone || typeof Zone.__symbol__ !== 'function') {
     return;
   }
-  window.removeEventListener(
-    'unhandledrejection',
-    rejectionListener,
-  );
-  window.addEventListener(
-    'unhandledrejection',
-    rejectionListener,
-  );
+  zoneHooked = true;
+  const key = Zone.__symbol__('unhandledPromiseRejectionHandler');
+  const previous = Zone[key];
+  Zone[key] = function (this: unknown, e: any) {
+    if (rejectionsActive) {
+      // A wrapped error carries the reason in `rejection`;
+      // with zone.js defaults it is the reason itself.
+      recordRejection(
+        e && typeof e === 'object' && 'rejection' in e
+          ? e.rejection
+          : e,
+      );
+    }
+    if (typeof previous === 'function') {
+      return previous.call(this, e);
+    }
+  };
 }
 
 function isErrorLike(

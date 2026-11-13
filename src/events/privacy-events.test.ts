@@ -209,50 +209,53 @@ describe('privacy options on events', () => {
     ]);
   });
 
-  it('records rejections after the listener moves to a patched addEventListener', () => {
-    // Stands in for zone.js: once it loads, only listeners added
-    // through its addEventListener hear about rejections.
-    faro.initEvents();
-    const nativeAdd = window.addEventListener;
-    const nativeRemove = window.removeEventListener;
-    const zoneListeners: EventListener[] = [];
-    const removed: unknown[] = [];
-    window.addEventListener = ((type: string, l: any, o?: any) => {
-      if (type === 'unhandledrejection') zoneListeners.push(l);
-      return nativeAdd.call(window, type, l, o);
-    }) as any;
-    window.removeEventListener = ((type: string, l: any, o?: any) => {
-      if (type === 'unhandledrejection') removed.push(l);
-      return nativeRemove.call(window, type, l, o);
-    }) as any;
+  it('records zone.js rejections through its handler slot, once', () => {
+    // A stand-in for zone.js: it calls the handler in this slot
+    // for a rejected zone promise and fires no browser event.
+    const prev = vi.fn();
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    Zone['__zone_symbol__unhandledPromiseRejectionHandler'] = prev;
+    (globalThis as any).Zone = Zone;
     try {
-      faro.reattachRejectionListener();
+      faro.initEvents();
+      faro.captureZoneRejections();
+      faro.captureZoneRejections(); // idempotent
+      const handler = Zone['__zone_symbol__unhandledPromiseRejectionHandler'];
+      // zone.js defaults: the bare error.
+      handler(new RangeError('zone boom'));
+      // Wrapped mode: the reason in `rejection`.
+      handler({ rejection: new TypeError('wrapped boom') });
+      // A native promise still fires the browser event.
+      const ev = new Event('unhandledrejection') as any;
+      ev.reason = new SyntaxError('native boom');
+      window.dispatchEvent(ev);
+      expect(prev).toHaveBeenCalledTimes(2);
     } finally {
-      window.addEventListener = nativeAdd;
-      window.removeEventListener = nativeRemove;
+      delete (globalThis as any).Zone;
     }
-    expect(zoneListeners).toHaveLength(1);
-    // The native registration was removed first, so one event
-    // is recorded once.
-    expect(removed).toEqual(zoneListeners);
-    const ev = new Event('unhandledrejection') as any;
-    ev.reason = new RangeError('boom');
-    window.dispatchEvent(ev);
-    const errors = enqueued.filter((e) => e.event_type === 'error');
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({
-      error_type: 'RangeError',
-      error_message: 'boom',
-      error_source: 'promise',
-    });
+    expect(
+      enqueued
+        .filter((e) => e.event_type === 'error')
+        .map((e) => `${e.error_source}:${e.error_type}:${e.error_message}`),
+    ).toEqual([
+      'promise:RangeError:zone boom',
+      'promise:TypeError:wrapped boom',
+      'promise:SyntaxError:native boom',
+    ]);
   });
 
-  it('does nothing on reattach after the SDK stopped', () => {
-    faro.initEvents();
-    faro.destroyEvents();
-    const add = vi.spyOn(window, 'addEventListener');
-    faro.reattachRejectionListener();
-    expect(add).not.toHaveBeenCalledWith('unhandledrejection', expect.anything());
+  it('records no zone.js rejection after the SDK stopped', () => {
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      faro.destroyEvents();
+      Zone['__zone_symbol__unhandledPromiseRejectionHandler'](new Error('late'));
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    expect(enqueued.filter((e) => e.event_type === 'error')).toHaveLength(0);
   });
 
   it('records both console levels by default', () => {

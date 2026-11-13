@@ -1,4 +1,4 @@
-import { r as g, s as U, a as P, b as h } from "./index-HSClfNQS.js";
+import { r as g, s as U, c as P, a as h } from "./index-DSMF-Xb3.js";
 const A = ["url.full", "http.url"], E = {
   onStart() {
   },
@@ -6,7 +6,7 @@ const A = ["url.full", "http.url"], E = {
     const t = e.attributes;
     for (const r of A) {
       const o = t[r];
-      typeof o == "string" && (t[r] = P(o));
+      typeof o == "string" && (t[r] = h(o));
     }
   },
   forceFlush: () => Promise.resolve(),
@@ -77,8 +77,8 @@ async function I(e) {
   u.register({
     contextManager: new a.ZoneContextManager(),
     propagator: new c.W3CTraceContextPropagator()
-  }), U(n.trace, n.context), h();
-  const b = l.getWebAutoInstrumentations(
+  }), U(n.trace, n.context), P();
+  const y = l.getWebAutoInstrumentations(
     {
       "@opentelemetry/instrumentation-fetch": {
         propagateTraceHeaderCorsUrls: m,
@@ -91,9 +91,9 @@ async function I(e) {
       "@opentelemetry/instrumentation-user-interaction": { enabled: !1 },
       "@opentelemetry/instrumentation-document-load": { enabled: !1 }
     }
-  ), { registerInstrumentations: y } = await import("@opentelemetry/instrumentation");
-  y({
-    instrumentations: b,
+  ), { registerInstrumentations: b } = await import("@opentelemetry/instrumentation");
+  b({
+    instrumentations: y,
     tracerProvider: u
   }), console.debug(
     "[@oodle-ai/rum] OpenTelemetry tracing initialized, exporting to:",

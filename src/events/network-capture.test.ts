@@ -234,7 +234,13 @@ describe('network capture', () => {
   });
 
   it('fails closed when the hook throws', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // console.warn is the SDK's wrapper here. Its warning goes to
+    // the method the wrapper replaced, and is not recorded as a
+    // console event of the app.
+    const warn = vi.fn();
+    const wrapper = console.warn as any;
+    const original = wrapper.__oodleOriginal;
+    wrapper.__oodleOriginal = warn;
     config.beforeSendNetwork = () => {
       throw new Error('boom');
     };
@@ -242,7 +248,9 @@ describe('network capture', () => {
     expect(ev.response_body).toBeUndefined();
     expect(ev.response_headers).toBeUndefined();
     expect(ev.resource_url).toBe(API);
-    expect(warn).toHaveBeenCalled();
+    wrapper.__oodleOriginal = original;
+    expect(warn).toHaveBeenCalledOnce();
+    expect(enqueued.filter((e) => e.event_type === 'console')).toHaveLength(0);
   });
 
   it('is not called for a request that captured nothing', async () => {

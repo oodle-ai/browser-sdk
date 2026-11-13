@@ -27,19 +27,11 @@ export interface PrivacyOptions {
     privacyLevel?: string;
     viewUrlQueryParams?: readonly string[];
 }
-interface CompiledPattern {
-    /** Literal segments, or `:name` for any one segment. */
-    segs: string[];
-    /** Ends in `*`: matches any number of further segments. */
-    rest: boolean;
-}
 /** Placeholder for a path whose mask function failed. */
 export declare const REDACTED_PATH = "/:redacted";
-export declare function compilePathPattern(pattern: string): CompiledPattern | null;
 export declare function configurePrivacy(opts: PrivacyOptions): void;
 /** Test hook: back to the behavior with no options set. */
 export declare function resetPrivacy(): void;
-export declare function hasPathMasking(): boolean;
 /**
  * The URL path with `urlPathPatterns` and `maskUrlPath`
  * applied. Called for every event, so it returns at once when
@@ -80,7 +72,6 @@ export declare function sanitizeReplayUrl(url: string): string;
 export declare function sanitizeSpanUrl(url: string): string;
 export declare function sanitizeReferrer(referrer: string): string;
 export declare function consoleLevels(): readonly ConsoleLevel[];
-export declare function messageMode(): MessageMode;
 export declare function sendUserAgent(): boolean;
 /**
  * The user fields from identify() as `userInfo` lets them be
@@ -117,4 +108,3 @@ export declare function sanitizeStack(stack: string, rawMessage: string): string
 export declare const BLOCK_SELECTOR: string;
 export declare const MASK_TEXT_SELECTOR: string;
 export declare function isActionTextMasked(el: Element): boolean;
-export {};

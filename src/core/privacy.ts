@@ -1,3 +1,5 @@
+import { sdkWarn } from './log';
+
 /**
  * Data minimization settings for what leaves the browser.
  *
@@ -79,12 +81,7 @@ const PATH_CACHE_MAX = 256;
 const pathCache = new Map<string, string>();
 let warnedMaskFnError = false;
 
-function warn(msg: string) {
-  // Bound to the console at call time, so the SDK's own
-  // console.warn hook (if installed) records it like any
-  // other warning instead of looping.
-  console.warn('[@oodle-ai/rum] ' + msg);
-}
+const warn = sdkWarn;
 
 /**
  * Picks `value` when it is one of `allowed`. An unknown value
@@ -114,7 +111,7 @@ function pickMode<T extends string>(
   return strictest;
 }
 
-export function compilePathPattern(
+function compilePathPattern(
   pattern: string,
 ): CompiledPattern | null {
   if (typeof pattern !== 'string') return null;
@@ -262,7 +259,7 @@ export function resetPrivacy(): void {
   warnedMaskFnError = false;
 }
 
-export function hasPathMasking(): boolean {
+function hasPathMasking(): boolean {
   return state.patterns.length > 0 || state.maskFn !== null;
 }
 
@@ -372,14 +369,18 @@ export function sanitizeResourceUrl(
     return u.origin + maskPath(u.pathname);
   }
   try {
-    const u = new URL(
-      url,
+    const b =
       base ??
-        (typeof location !== 'undefined'
-          ? location.href
-          : 'http://localhost/'),
-    );
-    return maskPath(u.pathname);
+      (typeof location !== 'undefined'
+        ? location.href
+        : 'http://localhost/');
+    const u = new URL(url, b);
+    // A protocol-relative URL (//cdn.example.com/x) names
+    // another host: keep it, so the request does not look
+    // same-origin.
+    return u.origin === new URL(b).origin
+      ? maskPath(u.pathname)
+      : u.origin + maskPath(u.pathname);
   } catch {
     const cut = url.search(/[?#]/);
     return cut >= 0 ? url.slice(0, cut) : url;
@@ -486,10 +487,6 @@ export function consoleLevels(): readonly ConsoleLevel[] {
   return state.consoleLevels;
 }
 
-export function messageMode(): MessageMode {
-  return state.messages;
-}
-
 export function sendUserAgent(): boolean {
   return state.userAgent === 'full';
 }
@@ -538,6 +535,7 @@ const UUID_RE =
 const HEX_RE =
   /\b(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{16,}\b/g;
 const LONG_NUM_RE = /\d{4,}/g;
+const MAX_SCRUB_CHARS = 8_192;
 
 /**
  * Replaces the parts of a message that most often hold data
@@ -547,11 +545,18 @@ const LONG_NUM_RE = /\d{4,}/g;
  */
 export function scrubMessage(msg: string): string {
   if (!msg) return msg;
-  let out = msg.replace(EMAIL_RE, '<email>');
-  out = out.replace(URL_RE, (u) => {
-    const s = sanitizeResourceUrl(u);
-    return s === u ? '<url>' : s;
-  });
+  // Bounds the work: an error message has no length limit,
+  // and the patterns below are run on all of it.
+  let out =
+    msg.length > MAX_SCRUB_CHARS
+      ? msg.slice(0, MAX_SCRUB_CHARS) + '… [truncated]'
+      : msg;
+  // URLs first, so their user info does not read as an email.
+  // Each one is sent as its origin and masked path.
+  out = out.replace(URL_RE, (u) => sanitizeResourceUrl(u));
+  // The email pattern backtracks on long runs of word
+  // characters, so it only runs when there can be a match.
+  if (out.includes('@')) out = out.replace(EMAIL_RE, '<email>');
   for (const [re, rep] of QUOTED_RES) {
     out = out.replace(re, rep);
   }

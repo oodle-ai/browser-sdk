@@ -34,11 +34,12 @@ import {
 } from '../core/transport';
 import { estimateJsonBytes } from '../core/size';
 import {
-  isBuiltInSensitiveHeader,
+  makeHeaderMatcher,
   makeKeyMatcher,
   redactBody,
-  type KeyMatcher,
+  type NameMatcher,
 } from '../core/redact';
+import { ORIGINAL, sdkWarn } from '../core/log';
 import {
   consoleLevels,
   maskPath,
@@ -210,37 +211,35 @@ let warnedBeforeSend = false;
  * event whose hook throws is dropped, because the hook may
  * exist to remove something that must not be sent.
  */
-export function applyBeforeSend(
+function applyBeforeSend(
   event: Record<string, unknown>,
 ): Record<string, unknown> | null {
   const hook = getConfig().beforeSend;
   if (typeof hook !== 'function') return event;
   const fixed: Record<string, unknown> = {};
   for (const f of FIXED_FIELDS) fixed[f] = event[f];
-  let r: unknown;
   try {
-    r = hook(event as RumEvent);
+    const r = hook(event as RumEvent);
+    if (r === null || r === false) return null;
+    if (isThenable(r)) {
+      throw new Error('it returned a promise; it must be synchronous');
+    }
+    // A copy, so a frozen object returned by the hook works.
+    const base =
+      r && typeof r === 'object'
+        ? (r as Record<string, unknown>)
+        : event;
+    return { ...base, ...fixed };
   } catch (e) {
     if (!warnedBeforeSend) {
       warnedBeforeSend = true;
-      // The original, not console.warn: the SDK's own console
-      // capture would turn this into an event, which would run
-      // the same failing hook.
-      (originalConsoleWarn ?? console.warn).call(
-        console,
-        '[@oodle-ai/rum] beforeSend threw. Events are dropped' +
-          ` until it is fixed: ${String(e)}`,
+      sdkWarn(
+        'beforeSend failed. Events are dropped until it is' +
+          ` fixed: ${String(e)}`,
       );
     }
     return null;
   }
-  if (r === null || r === false) return null;
-  const out =
-    r && typeof r === 'object'
-      ? (r as Record<string, unknown>)
-      : event;
-  for (const f of FIXED_FIELDS) out[f] = fixed[f];
-  return out;
 }
 
 function emitEvent(
@@ -355,7 +354,18 @@ function initErrorTracking() {
 
 let rejectionsActive = false;
 
+/**
+ * Errors already recorded as rejections. zone.js can, in one
+ * configuration, both call its handler slot and dispatch the
+ * event to a listener it tracks, for the same rejection.
+ */
+const recordedRejections = new WeakSet<object>();
+
 function recordRejection(reason: any) {
+  if (reason !== null && typeof reason === 'object') {
+    if (recordedRejections.has(reason)) return;
+    recordedRejections.add(reason);
+  }
   emitEvent(() => {
     const raw = reason?.message ?? String(reason);
     return {
@@ -398,13 +408,21 @@ export function captureZoneRejections() {
   const previous = Zone[key];
   Zone[key] = function (this: unknown, e: any) {
     if (rejectionsActive) {
-      // A wrapped error carries the reason in `rejection`;
-      // with zone.js defaults it is the reason itself.
-      recordRejection(
-        e && typeof e === 'object' && 'rejection' in e
-          ? e.rejection
-          : e,
-      );
+      try {
+        // zone.js's wrapper error carries the reason in
+        // `rejection` next to `promise`; with zone.js defaults
+        // the handler gets the reason itself.
+        recordRejection(
+          e &&
+            typeof e === 'object' &&
+            'rejection' in e &&
+            'promise' in e
+            ? e.rejection
+            : e,
+        );
+      } catch {
+        // Never keep the handler the app had from running.
+      }
     }
     if (typeof previous === 'function') {
       return previous.call(this, e);
@@ -491,24 +509,31 @@ function consoleMessage(args: unknown[]): string {
     : out;
 }
 
-/** console.warn as it was before the SDK wrapped it. */
-let originalConsoleWarn: typeof console.warn | null = null;
-
 function initConsoleTracking() {
-  originalConsoleWarn = console.warn;
   // A level that is not recorded is not wrapped either, so
   // its calls cost the app nothing.
   for (const level of consoleLevels()) {
     const original = console[level];
-    console[level] = (...args: unknown[]) => {
-      const msg = sanitizeMessage(consoleMessage(args));
-      emitEvent(() => ({
-        event_type: 'console',
-        console_level: level,
-        console_message: msg,
-      }));
+    const wrapper = (...args: unknown[]) => {
+      // The app's own console call must happen whatever
+      // recording it does.
+      try {
+        const msg = sanitizeMessage(consoleMessage(args));
+        emitEvent(() => ({
+          event_type: 'console',
+          console_level: level,
+          console_message: msg,
+        }));
+      } catch {
+        // Recording failed; the call itself still goes through.
+      }
       original.apply(console, args);
     };
+    // Lets SDK warnings reach the console without being
+    // recorded as the app's console events.
+    (wrapper as unknown as Record<string, unknown>)[ORIGINAL] =
+      original;
+    console[level] = wrapper;
     teardownFns.push(() => {
       console[level] = original;
     });
@@ -906,39 +931,22 @@ function resolveUrlDecisions(
   };
 }
 
-let redactCacheFor: unknown = null;
-let redactNames = new Set<string>();
-let redactPatterns: RegExp[] = [];
+let headerNamesFor: unknown = null;
+let headerMatcher: NameMatcher = makeHeaderMatcher(undefined);
 
 /**
- * Whether a header must not be sent: the built-in list plus
- * the app's `redactHeaders`. The parsed option is cached per
- * config value, since this runs for every captured header.
+ * Whether a header must not be sent: the built-in pattern
+ * plus the app's `redactHeaders`. The matcher is rebuilt only
+ * when the option changes, since this runs for every
+ * captured header.
  */
 function isSensitiveHeader(lowerName: string): boolean {
-  if (isBuiltInSensitiveHeader(lowerName)) return true;
   const extra = getConfig().redactHeaders;
-  if (!extra) return false;
-  if (extra !== redactCacheFor) {
-    redactCacheFor = extra;
-    redactNames = new Set();
-    redactPatterns = [];
-    if (Array.isArray(extra)) {
-      for (const e of extra) {
-        if (typeof e === 'string') {
-          redactNames.add(e.toLowerCase());
-        } else if (e instanceof RegExp) {
-          redactPatterns.push(e);
-        }
-      }
-    }
+  if (extra !== headerNamesFor) {
+    headerNamesFor = extra;
+    headerMatcher = makeHeaderMatcher(extra);
   }
-  if (redactNames.has(lowerName)) return true;
-  for (const re of redactPatterns) {
-    re.lastIndex = 0;
-    if (re.test(lowerName)) return true;
-  }
-  return false;
+  return headerMatcher(lowerName);
 }
 
 /**
@@ -965,6 +973,14 @@ const CAPTURE_FIELDS = [
 
 let warnedNetworkHook = false;
 
+function isThenable(v: unknown): boolean {
+  return (
+    !!v &&
+    (typeof v === 'object' || typeof v === 'function') &&
+    typeof (v as { then?: unknown }).then === 'function'
+  );
+}
+
 function parseHeaderJson(
   s: unknown,
 ): Record<string, string> | undefined {
@@ -989,19 +1005,10 @@ function headerJson(h: unknown): string {
     : '';
 }
 
-/**
- * Runs `beforeSendNetwork` on the headers and bodies a
- * resource event captured. Only events that captured
- * something reach the hook, so a page without
- * `forwardNetworkHeaders` / `forwardNetworkBodies` never
- * pays for it. Fails closed: if the hook throws, the
- * captured headers and bodies are dropped and the timing
- * event is sent without them.
- */
 let bodyKeysFor: unknown = null;
-let bodyKeyMatcher: KeyMatcher = makeKeyMatcher(undefined);
+let bodyKeyMatcher: NameMatcher = makeKeyMatcher(undefined);
 
-function sensitiveBodyKey(): KeyMatcher {
+function sensitiveBodyKey(): NameMatcher {
   const extra = getConfig().redactBodyKeys;
   if (extra !== bodyKeysFor) {
     bodyKeysFor = extra;
@@ -1010,7 +1017,16 @@ function sensitiveBodyKey(): KeyMatcher {
   return bodyKeyMatcher;
 }
 
-export function applyNetworkHook(
+/**
+ * Redacts the headers and bodies a resource event captured,
+ * then runs `beforeSendNetwork` on them. Only events that
+ * captured something get here, so a page without
+ * `forwardNetworkHeaders` / `forwardNetworkBodies` never pays
+ * for it. Fails closed: if the hook throws or returns a
+ * promise, the captured headers and bodies are dropped and
+ * the timing event is sent without them.
+ */
+function applyNetworkHook(
   d: Record<string, unknown>,
 ): void {
   if (!CAPTURE_FIELDS.some((f) => d[f])) return;
@@ -1041,14 +1057,16 @@ export function applyNetworkHook(
   let out: NetworkCapture | null | void;
   try {
     const r = hook(capture);
+    if (isThenable(r)) {
+      throw new Error('it returned a promise; it must be synchronous');
+    }
     out = r === undefined ? capture : r;
   } catch (e) {
     if (!warnedNetworkHook) {
       warnedNetworkHook = true;
-      console.warn(
-        '[@oodle-ai/rum] beforeSendNetwork threw. Captured' +
-          ' headers and bodies are dropped until it is' +
-          ` fixed: ${String(e)}`,
+      sdkWarn(
+        'beforeSendNetwork failed. Captured headers and' +
+          ` bodies are dropped until it is fixed: ${String(e)}`,
       );
     }
     out = null;

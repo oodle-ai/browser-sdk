@@ -178,6 +178,30 @@ describe('privacy options on events', () => {
     expect(enqueued[0]).toMatchObject({ event_type: 'view', extra: 1 });
   });
 
+  it('accepts a frozen event returned by beforeSend', () => {
+    config.beforeSend = (e: any) => Object.freeze({ ...e, view_url_path: '/x' });
+    try {
+      expect(() => faro.trackPageView()).not.toThrow();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued[0]).toMatchObject({ view_url_path: '/x', event_type: 'view' });
+  });
+
+  it('drops events from an async beforeSend, and warns once', () => {
+    const warn = vi.fn();
+    console.warn = warn;
+    config.beforeSend = async (e: any) => e;
+    try {
+      faro.trackPageView();
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
   it('drops the event when beforeSend throws, and warns once', () => {
     const warn = vi.fn();
     console.warn = warn;
@@ -224,7 +248,7 @@ describe('privacy options on events', () => {
       // zone.js defaults: the bare error.
       handler(new RangeError('zone boom'));
       // Wrapped mode: the reason in `rejection`.
-      handler({ rejection: new TypeError('wrapped boom') });
+      handler({ rejection: new TypeError('wrapped boom'), promise: {} });
       // A native promise still fires the browser event.
       const ev = new Event('unhandledrejection') as any;
       ev.reason = new SyntaxError('native boom');
@@ -256,6 +280,40 @@ describe('privacy options on events', () => {
       delete (globalThis as any).Zone;
     }
     expect(enqueued.filter((e) => e.event_type === 'error')).toHaveLength(0);
+  });
+
+  it('records a rejected Error once, however many paths report it', () => {
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      const err = new Error('twice');
+      Zone['__zone_symbol__unhandledPromiseRejectionHandler'](err);
+      const ev = new Event('unhandledrejection') as any;
+      ev.reason = err;
+      window.dispatchEvent(ev);
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    expect(enqueued.filter((e) => e.event_type === 'error')).toHaveLength(1);
+  });
+
+  it('keeps calling the console when recording fails', () => {
+    const inner = vi.fn();
+    console.error = inner;
+    faro.initEvents();
+    config.beforeSend = () => {
+      throw new Error('boom');
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      console.error('still logged');
+    } finally {
+      delete config.beforeSend;
+      warn.mockRestore();
+    }
+    expect(inner).toHaveBeenCalledWith('still logged');
   });
 
   it('records both console levels by default', () => {

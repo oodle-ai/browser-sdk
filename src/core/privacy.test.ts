@@ -162,6 +162,12 @@ describe('sanitizeResourceUrl', () => {
     ).toBe('/api/projects/:id');
   });
 
+  it('keeps the host of a protocol-relative URL', () => {
+    expect(
+      sanitizeResourceUrl('//cdn.example.com/a/b?x=1', 'https://app.x.com/p'),
+    ).toBe('https://cdn.example.com/a/b');
+  });
+
   it('sends no payload for a data: URL', () => {
     expect(sanitizeResourceUrl('data:text/plain,secret')).toBe('data:');
   });
@@ -279,6 +285,14 @@ describe('scrubMessage', () => {
     expect(scrubMessage('at https://x.com/p/acme')).toBe(
       'at https://x.com/p/:id',
     );
+  });
+
+  it('bounds the work on a long message with no @', () => {
+    const long = 'A'.repeat(64_000);
+    const t = performance.now();
+    const out = scrubMessage(long);
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(out.endsWith('… [truncated]')).toBe(true);
   });
 
   it('is linear on long hostile input', () => {

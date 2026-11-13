@@ -5,13 +5,6 @@
  * example the record that a drawer shows).
  */
 export declare function viewUrl(location: Pick<Location, 'origin' | 'pathname' | 'search'>, keep: readonly string[] | undefined): string;
-/**
- * Runs the app's `beforeSend` on a finished event. Returns
- * the event to send, or null to drop it. Fails closed: an
- * event whose hook throws is dropped, because the hook may
- * exist to remove something that must not be sent.
- */
-export declare function applyBeforeSend(event: Record<string, unknown>): Record<string, unknown> | null;
 export declare function initEvents(): void;
 /**
  * Records rejections of zone.js promises. Called once zone.js
@@ -69,7 +62,6 @@ export declare function captureZoneRejections(): void;
  * retrying path.
  */
 export declare function initVisibilityTracking(): void;
-export declare function applyNetworkHook(d: Record<string, unknown>): void;
 export declare function trackPageView(): void;
 export declare function trackAction(type: string, target: string, selector: string, text: string, isFrustration: boolean, clickX?: number, clickY?: number): void;
 export declare function trackCustomEvent(name: string, properties?: Record<string, unknown>): void;

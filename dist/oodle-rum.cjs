@@ -1,1 +1,1 @@
-"use strict";Object.defineProperty(exports,Symbol.toStringTag,{value:"Module"});const e=require("./index-gODNj_Ci.cjs");exports.OodleRum=e.OodleRum;
+"use strict";Object.defineProperty(exports,Symbol.toStringTag,{value:"Module"});const e=require("./index-B65U8bDl.cjs");exports.OodleRum=e.OodleRum;

@@ -6,14 +6,18 @@
  * monitoring backend.
  */
 export declare const REDACTED = "[REDACTED]";
-export declare function isBuiltInSensitiveHeader(lowerName: string): boolean;
-export type KeyMatcher = (key: string) => boolean;
-export declare function makeKeyMatcher(extra: readonly (string | RegExp)[] | undefined): KeyMatcher;
+export type NameMatcher = (name: string) => boolean;
+/** For lowercase header names; extra names ignore case. */
+export declare function makeHeaderMatcher(extra: readonly (string | RegExp)[] | undefined): NameMatcher;
+/** For body keys; ignores case, `-`, `_`, `.` and spaces. */
+export declare function makeKeyMatcher(extra: readonly (string | RegExp)[] | undefined): NameMatcher;
 /** Payment card numbers, recognized by their checksum. */
 export declare function redactCardNumbers(s: string): string;
 /**
  * A captured body with sensitive values replaced. JSON keeps
- * its shape; form-encoded bodies keep their keys. Card
- * numbers are replaced wherever they appear.
+ * its shape; form-encoded bodies keep their keys. Card numbers
+ * are replaced wherever they appear. A body with nothing to
+ * redact is returned exactly as captured: re-serializing JSON
+ * would round large integers and drop its formatting.
  */
-export declare function redactBody(body: string, isSensitive: KeyMatcher): string;
+export declare function redactBody(body: string, isSensitive: NameMatcher): string;

@@ -311,13 +311,15 @@ These headers are never sent, whatever the settings:
   `fastly-client-ip`
 - Any header whose name contains `token`, `secret`, `auth`, `cookie`,
   `passw`, `api-key`, `apikey`, `access-key`, `session`, `csrf`, `xsrf`,
-  `client-ip`, `real-ip` or `forwarded`, such as `x-auth-token`,
-  `x-csrf-token` or `x-session-id`
+  `client-ip`, `real-ip` or `connecting-ip`, or ends in `-forwarded-for`,
+  such as `x-auth-token`, `x-csrf-token` or `x-session-id`.
+  `x-forwarded-proto` and `x-forwarded-host` are kept.
 
 In captured bodies, the values of these keys are replaced with
 `[REDACTED]`, at any depth in JSON and in form-encoded bodies:
 
-- Keys whose name contains `passw`, `secret`, `token`, `apikey`,
+- Keys whose name contains `passw`, `secret`, `token` (but not token
+  counts and limits such as `total_tokens` or `max_tokens`), `apikey`,
   `accesskey`, `privatekey`, `authorization`, `credential`, `cardnumber`,
   `creditcard`, `cvv`, `cvc`, `securitycode`, `socialsecurity`, `ipaddr`,
   `clientip`, `remoteaddr` or `remoteip`, and the keys `ip`, `ipv4`,
@@ -326,7 +328,8 @@ In captured bodies, the values of these keys are replaced with
 - Payment card numbers anywhere in a body, found by their checksum.
 
 Built-in redaction runs before `beforeSendNetwork` and `beforeSend`, so
-neither hook sees the removed values.
+neither hook sees the removed values. A body with nothing to redact is sent
+exactly as captured.
 
 To keep more headers out, list them in `redactHeaders`. A string matches
 the whole name, ignoring case, and a RegExp is tested against the
@@ -365,8 +368,9 @@ beforeSendNetwork: (capture) => {
   in every case. Only the captured headers and bodies change.
 - `url`, `method` and `status` are for reading. Changes to them are
   ignored.
-- If the function throws, no headers or bodies are sent for that
-  request, and the SDK logs one console warning.
+- If the function throws or returns a promise, no headers or bodies are
+  sent for that request, and the SDK logs one console warning. The
+  function must be synchronous.
 - The built-in redaction, `redactHeaders` and `redactBodyKeys` are
   applied before the function runs, so it never sees those values.
 
@@ -390,9 +394,9 @@ beforeSend: (event) => {
 - Change the event and return nothing, return a new object, or return
   `null` or `false` to drop the event.
 - `session_id`, `event_type` and `timestamp` cannot be changed.
-- If the function throws, the event is dropped and the SDK logs one
-  console warning, so a broken hook does not send what it was meant to
-  remove.
+- If the function throws or returns a promise, the event is dropped and the
+  SDK logs one console warning, so a broken hook does not send what it was
+  meant to remove. The function must be synchronous.
 - It runs after every other option, so it sees events as they would be
   sent.
 - Session replay data does not pass through it. Use `privacyLevel` and

@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   REDACTED,
-  isBuiltInSensitiveHeader,
+  makeHeaderMatcher,
   makeKeyMatcher,
   redactBody,
   redactCardNumbers,
 } from './redact';
 
 const builtIn = makeKeyMatcher(undefined);
+const isBuiltInSensitiveHeader = makeHeaderMatcher(undefined);
 
 describe('isBuiltInSensitiveHeader', () => {
   it('matches exact names and name patterns', () => {
@@ -24,7 +25,15 @@ describe('isBuiltInSensitiveHeader', () => {
       'x-goog-api-key',
       'x-client-secret',
       'x-debug-client-ip',
-      'x-forwarded-host',
+      'forwarded',
+      'x-forwarded-for',
+      'x-original-forwarded-for',
+      'proxy-authorization',
+      'set-cookie',
+      'x-api-key',
+      'x-real-ip',
+      'true-client-ip',
+      'fastly-client-ip',
     ]) {
       expect(isBuiltInSensitiveHeader(h), h).toBe(true);
     }
@@ -41,6 +50,10 @@ describe('isBuiltInSensitiveHeader', () => {
       'traceparent',
       'server-timing',
       'x-ratelimit-remaining',
+      // Hold no address: only forwarded and *-forwarded-for do.
+      'x-forwarded-proto',
+      'x-forwarded-host',
+      'x-forwarded-port',
     ]) {
       expect(isBuiltInSensitiveHeader(h), h).toBe(false);
     }
@@ -71,9 +84,38 @@ describe('redactBody', () => {
     );
   });
 
-  it('does not change a body with nothing sensitive', () => {
-    const body = '{"q":"salaries","page":2}';
+  it('returns a body with nothing sensitive exactly as captured', () => {
+    for (const body of [
+      '{"q":"salaries","page":2}',
+      // Re-serializing would round this integer...
+      '{"id":1234567890123456789}',
+      // ...flatten this formatting...
+      '{\n  "a": 1,\n  "b": [1, 2]\n}',
+      // ...and drop this key.
+      '{"__proto__":{"x":1},"a":1}',
+    ]) {
+      expect(redactBody(body, builtIn)).toBe(body);
+    }
+  });
+
+  it('keeps a __proto__ key when something else is redacted', () => {
+    expect(
+      JSON.parse(redactBody('{"__proto__":{"x":1},"password":"p"}', builtIn)),
+    ).toEqual(JSON.parse('{"__proto__":{"x":1},"password":"[REDACTED]"}'));
+  });
+
+  it('keeps LLM token counts and limits', () => {
+    const body =
+      '{"usage":{"total_tokens":120,"prompt_tokens":20},"max_tokens":256,"token_count":3,"tokenLimit":9,"token_type":"bearer"}';
     expect(redactBody(body, builtIn)).toBe(body);
+    expect(
+      JSON.parse(redactBody('{"access_token":"a","refresh_token":"r","token":"t","nextPageToken":"n"}', builtIn)),
+    ).toEqual({
+      access_token: REDACTED,
+      refresh_token: REDACTED,
+      token: REDACTED,
+      nextPageToken: REDACTED,
+    });
   });
 
   it('handles JSON cut short by maxBodySize', () => {
@@ -83,11 +125,35 @@ describe('redactBody', () => {
     );
   });
 
+  it('reaches keys inside nested objects of cut JSON', () => {
+    expect(
+      redactBody('{"user":{"password":"hunter2","name":"bob"},"x":"ab', builtIn),
+    ).toBe(`{"user":{"password":"${REDACTED}","name":"bob"},"x":"ab`);
+  });
+
+  it('ends cut JSON at a sensitive object or array value', () => {
+    expect(redactBody('{"a":1,"secrets":["s1","s2"],"b":"x', builtIn)).toBe(
+      `{"a":1,"secrets":"${REDACTED}"`,
+    );
+    expect(redactBody('{"a":1,"credentials":{"k":"v"},"b', builtIn)).toBe(
+      `{"a":1,"credentials":"${REDACTED}"`,
+    );
+  });
+
+  it('ends cut JSON inside an unfinished sensitive string', () => {
+    expect(redactBody('{"a":1,"password":"hunt', builtIn)).toBe(
+      `{"a":1,"password":"${REDACTED}"`,
+    );
+  });
+
   it('redacts form-encoded bodies by key', () => {
     expect(redactBody('user=jane&password=hunter2&x=1', builtIn)).toBe(
       'user=jane&password=%5BREDACTED%5D&x=1',
     );
     expect(redactBody('user=jane&x=1', builtIn)).toBe('user=jane&x=1');
+    expect(redactBody('user[name]=jane&user[password]=x', builtIn)).toBe(
+      'user%5Bname%5D=jane&user%5Bpassword%5D=%5BREDACTED%5D',
+    );
   });
 
   it('uses the extra keys', () => {

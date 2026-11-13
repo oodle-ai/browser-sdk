@@ -42,6 +42,7 @@ import {
   initReplay,
   stopReplay,
 } from './replay/recorder';
+import { isActionTextMasked } from './core/privacy';
 import {
   initTelemetry,
   destroyTelemetry,
@@ -250,17 +251,19 @@ function setupClickTracking():
     if (!target) return;
 
     const selector = getSelector(target);
-    const text = (
-      target.textContent ?? ''
-    )
-      .trim()
-      .slice(0, 200);
+    const masked = isActionTextMasked(target);
+    const text = masked
+      ? ''
+      : (target.textContent ?? '')
+          .trim()
+          .slice(0, 200);
     const tagName =
       target.tagName?.toLowerCase() ?? '';
     const targetName = getTargetName(
       target,
       tagName,
       text,
+      masked,
     );
     const now = Date.now();
     const clickX = (e as MouseEvent).clientX;
@@ -390,7 +393,11 @@ function getTargetName(
   el: HTMLElement,
   tagName: string,
   text: string,
+  masked = false,
 ): string {
+  // aria-label and title are text a user reads, and often
+  // hold the same data as the element's content.
+  if (masked) return getIdOrClassName(el, tagName);
   const ariaLabel =
     el.getAttribute('aria-label');
   if (ariaLabel) {
@@ -402,6 +409,13 @@ function getTargetName(
   if (shortText && shortText.length <= 80) {
     return `${tagName}[${shortText}]`;
   }
+  return getIdOrClassName(el, tagName);
+}
+
+function getIdOrClassName(
+  el: HTMLElement,
+  tagName: string,
+): string {
   if (el.id) return `${tagName}#${el.id}`;
   const classes = Array.from(
     el.classList ?? [],

@@ -31,6 +31,15 @@ import {
   isServerRateLimited,
 } from '../core/transport';
 import { estimateJsonBytes } from '../core/size';
+import {
+  consoleLevels,
+  maskPath,
+  sanitizeMessage,
+  sanitizeReferrer,
+  sanitizeResourceUrl,
+  sanitizeStack,
+  sendUserAgent,
+} from '../core/privacy';
 import { tryConsume } from '../core/rate-limiter';
 import { incrTelemetry } from '../core/telemetry';
 import {
@@ -86,15 +95,6 @@ function isRateLimited(
   return false;
 }
 
-function stripQuery(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.origin + u.pathname;
-  } catch {
-    return url;
-  }
-}
-
 /**
  * The page URL without its query string, except for the
  * parameters in `viewUrlQueryParams`. Those stay, so that a
@@ -105,7 +105,7 @@ export function viewUrl(
   location: Pick<Location, 'origin' | 'pathname' | 'search'>,
   keep: readonly string[] | undefined,
 ): string {
-  const base = location.origin + location.pathname;
+  const base = location.origin + maskPath(location.pathname);
   // setConfig() already normalizes the option. Check again here,
   // because this runs for every event and must never throw.
   if (
@@ -156,12 +156,14 @@ function baseContext(): Record<string, unknown> {
       config.viewUrlQueryParams,
     ),
     view_url_host: window.location.hostname,
-    view_url_path: window.location.pathname,
-    referrer_url: stripQuery(document.referrer),
+    view_url_path: maskPath(window.location.pathname),
+    referrer_url: sanitizeReferrer(document.referrer),
     device_type: cachedContext!.device_type,
     browser_name: cachedContext!.browser_name,
     os_name: cachedContext!.os_name,
-    user_agent: cachedContext!.user_agent,
+    user_agent: sendUserAgent()
+      ? cachedContext!.user_agent
+      : '',
     language: cachedContext!.language,
     session_view_count: counts.viewCount,
     session_error_count: counts.errorCount,
@@ -253,31 +255,48 @@ export function initEvents() {
 
 function initErrorTracking() {
   const onError = (event: ErrorEvent) => {
-    emitEvent(() => ({
-      event_type: 'error',
-      error_message: event.message ?? '',
-      error_type:
-        event.error?.name ?? 'Error',
-      error_stack:
-        event.error?.stack ?? '',
-      error_source: 'source',
-    }));
+    emitEvent(() => {
+      const raw = event.message ?? '';
+      // event.message is "Uncaught Error: msg"; the stack
+      // holds the error's own message.
+      const own =
+        typeof event.error?.message === 'string'
+          ? event.error.message
+          : raw;
+      return {
+        event_type: 'error',
+        error_message: sanitizeMessage(raw),
+        error_type:
+          event.error?.name ?? 'Error',
+        error_stack: sanitizeStack(
+          event.error?.stack ?? '',
+          own,
+        ),
+        error_source: 'source',
+      };
+    });
   };
 
   const onUnhandledRejection = (
     event: PromiseRejectionEvent,
   ) => {
     const reason = event.reason;
-    emitEvent(() => ({
-      event_type: 'error',
-      error_message:
-        reason?.message ?? String(reason),
-      error_type:
-        reason?.name ??
-        'UnhandledRejection',
-      error_stack: reason?.stack ?? '',
-      error_source: 'promise',
-    }));
+    emitEvent(() => {
+      const raw =
+        reason?.message ?? String(reason);
+      return {
+        event_type: 'error',
+        error_message: sanitizeMessage(raw),
+        error_type:
+          reason?.name ??
+          'UnhandledRejection',
+        error_stack: sanitizeStack(
+          reason?.stack ?? '',
+          raw,
+        ),
+        error_source: 'promise',
+      };
+    });
   };
 
   window.addEventListener('error', onError);
@@ -354,35 +373,23 @@ function consoleMessage(args: unknown[]): string {
 }
 
 function initConsoleTracking() {
-  const original = {
-    error: console.error,
-    warn: console.warn,
-  };
-
-  console.error = (...args: unknown[]) => {
-    const msg = consoleMessage(args);
-    emitEvent(() => ({
-      event_type: 'console',
-      console_level: 'error',
-      console_message: msg,
-    }));
-    original.error.apply(console, args);
-  };
-
-  console.warn = (...args: unknown[]) => {
-    const msg = consoleMessage(args);
-    emitEvent(() => ({
-      event_type: 'console',
-      console_level: 'warn',
-      console_message: msg,
-    }));
-    original.warn.apply(console, args);
-  };
-
-  teardownFns.push(() => {
-    console.error = original.error;
-    console.warn = original.warn;
-  });
+  // A level that is not recorded is not wrapped either, so
+  // its calls cost the app nothing.
+  for (const level of consoleLevels()) {
+    const original = console[level];
+    console[level] = (...args: unknown[]) => {
+      const msg = sanitizeMessage(consoleMessage(args));
+      emitEvent(() => ({
+        event_type: 'console',
+        console_level: level,
+        console_message: msg,
+      }));
+      original.apply(console, args);
+    };
+    teardownFns.push(() => {
+      console[level] = original;
+    });
+  }
 }
 
 const viewMetrics: Record<string, number> = {};
@@ -645,7 +652,7 @@ function initResourceTracking() {
           continue;
         }
 
-        const url = stripQuery(res.name);
+        const url = sanitizeResourceUrl(res.name);
         const dur = res.duration;
         const sz = res.transferSize ?? 0;
         const init = initiator;
@@ -1077,7 +1084,7 @@ function wrapFetch(
             unknown
           > = {
             event_type: 'resource',
-            resource_url: stripQuery(url),
+            resource_url: sanitizeResourceUrl(url),
             resource_method: method,
             resource_status: status,
             resource_duration_ms: dur,
@@ -1155,7 +1162,7 @@ function wrapFetch(
               unknown
             > = {
               event_type: 'resource',
-              resource_url: stripQuery(url),
+              resource_url: sanitizeResourceUrl(url),
               resource_method: method,
               resource_status: 0,
               resource_duration_ms: dur,
@@ -1331,7 +1338,7 @@ function wrapXHR(
             unknown
           > = {
             event_type: 'resource',
-            resource_url: stripQuery(xhrUrl),
+            resource_url: sanitizeResourceUrl(xhrUrl),
             resource_method: xhrMethod,
             resource_status: xhrThis.status,
             resource_duration_ms: dur,

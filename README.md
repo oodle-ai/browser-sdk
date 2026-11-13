@@ -85,6 +85,13 @@ OodleRum.trackEvent('checkout_completed', {
 | `privacyLevel` | `string` | `'mask-user-input'` | `'mask-user-input'` masks password/email inputs; `'mask'` masks all text and inputs; `'allow'` masks nothing |
 | `tags` | `object` | `undefined` | Custom key-value tags attached to all events |
 | `viewUrlQueryParams` | `string[]` | `undefined` | Query parameter names to keep in `view_url` on every event (for example `['traceId']`). All other parameters are dropped. See [Privacy](#privacy) |
+| `urlPathPatterns` | `string[]` | `undefined` | Route templates such as `'/projects/:id/tables/:table'`. Matching path segments are replaced by the `:name` before they are sent. See [Masking URL paths](#masking-url-paths) |
+| `maskUrlPath` | `(path) => string` | `undefined` | Rewrites URL paths before they are sent, after `urlPathPatterns` |
+| `referrerUrl` | `'path' \| 'origin' \| 'none'` | `'path'` | What `referrer_url` holds |
+| `consoleLevels` | `('error' \| 'warn')[]` | `['error', 'warn']` | Console levels recorded. `[]` records none |
+| `errorMessages` | `'full' \| 'scrub' \| 'none'` | `'full'` | What error and console messages hold. See [Error and console messages](#error-and-console-messages) |
+| `actionText` | `'full' \| 'mask'` | `'mask'` with `privacyLevel: 'mask'`, else `'full'` | `'mask'` sends no element text with click events |
+| `userAgent` | `'full' \| 'none'` | `'full'` | `'none'` sends `user_agent` empty. `browser_name`, `os_name` and `device_type` are still sent |
 | `openTelemetry` | `boolean \| object` | `undefined` | Send browser traces for fetch and XHR calls. See [Browser tracing](#browser-tracing) |
 | `allowedTracingUrls` | `(string \| RegExp)[]` | all URLs | URLs that get the `traceparent` header |
 
@@ -106,16 +113,119 @@ OodleRum.init({ /* ... */, openTelemetry: true });
 - **JavaScript errors** and unhandled rejections
 - **Network requests** — fetch and XHR with timing
 - **User actions** — clicks, rage clicks, dead clicks
-- **Console errors**
+- **Console errors and warnings**
 - **Session Replay** — pixel-perfect DOM recordings
 
 ## Privacy
 
-The SDK removes the query string from `view_url` and `referrer_url`, because
-a query string can hold tokens or personal data. Two other places keep the
-full URL: `resource_url` on network request events, and the page URL that
-session replay records. Keep secrets out of URLs, or turn off
-`sessionReplay` for pages that have them in the URL.
+Every privacy option below is off by default, except where noted, so the
+SDK sends the same data as before until you set one.
+
+### What each option changes
+
+| Data | Sent by default | Option to change it |
+|------|-----------------|---------------------|
+| URL paths (`view_url`, `view_url_path`, `referrer_url`, `resource_url`, replay page URL, span `url.full`) | As in the address bar | `urlPathPatterns`, `maskUrlPath` |
+| URL query strings | Dropped, except on the replay page URL and span `url.full` | `viewUrlQueryParams` |
+| Referrer | Origin and path | `referrerUrl` |
+| Console output | `console.error` and `console.warn` | `consoleLevels` |
+| Error and console messages | As written | `errorMessages` |
+| Clicked element text, `aria-label`, `title` | Sent, except under `privacyLevel: 'mask'` or inside masked elements | `actionText` |
+| User agent string | Sent | `userAgent` |
+
+A configuration that sends as little as possible:
+
+```javascript
+OodleRum.init({
+  /* ... */
+  privacyLevel: 'mask',
+  urlPathPatterns: ['/projects/:project/tables/:table', '/projects/:project/*'],
+  referrerUrl: 'none',
+  consoleLevels: ['error'],
+  errorMessages: 'none',
+  actionText: 'mask',
+  userAgent: 'none',
+});
+```
+
+An option given a value it does not accept falls back to its most private
+setting, with a console warning, so a misspelled setting does not send the
+data it was meant to hold back.
+
+### Masking URL paths
+
+Paths often name the records a user opens, such as
+`/projects/acme/tables/salaries`. List the app's routes in
+`urlPathPatterns`, and the matching segments are replaced by their names:
+
+```javascript
+urlPathPatterns: [
+  '/projects/:project/tables/:table', // -> /projects/:project/tables/:table
+  '/projects/:project/*',             // -> /projects/:project/*
+  '/api/projects/:project/*',
+],
+```
+
+- A `:name` segment matches any one segment. Other segments must match
+  exactly (case-sensitive).
+- A pattern matches only a path with the same number of segments, unless it
+  ends in `/*`, which also matches all further segments and sends them as `*`.
+- The first matching pattern wins. A path that matches none is sent unchanged.
+- The patterns apply to the page path and to network request paths, so list
+  API routes too.
+- `view_url_path` is masked too, so views of different records group under
+  one route.
+
+For rules a pattern cannot express, set `maskUrlPath`. It gets the path after
+`urlPathPatterns` and returns the path to send:
+
+```javascript
+maskUrlPath: (path) => path.replace(/\/users\/[^/]+/, '/users/:id'),
+```
+
+If `maskUrlPath` throws or returns something other than a string, the path is
+sent as `/:redacted`.
+
+The replay page URL and span `url.full` keep their query strings. Path
+masking changes only their paths.
+
+### Error and console messages
+
+Messages often include the data that failed, such as a table name, an email
+or an ID. `errorMessages` controls `error_message`, the message at the top of
+`error_stack` and `console_message`:
+
+- `'full'` (default): sent as written.
+- `'scrub'`: quoted strings, URLs, emails, UUIDs, long hex IDs and numbers of
+  4 or more digits are replaced, for example
+  `Table 'salaries' not found` becomes `Table '?' not found`. Errors of the
+  same kind still group together. Unquoted words are kept, so use `'none'`
+  if messages can name records without quotes.
+- `'none'`: no message text. `error_type` and the stack frames are still sent.
+
+Stack frames (script URLs, line and column numbers) are sent in every mode,
+so stacks still map to source.
+
+To stop recording console output, set `consoleLevels` to `['error']` or `[]`.
+A level that is not listed is not wrapped at all.
+
+### Click events
+
+Click events carry the clicked element's text, or its `aria-label` or
+`title`, as `action_text` and `action_target`. Set `actionText: 'mask'` to
+send only the tag, id and classes, for example `button#delete-btn`.
+
+This is the default under `privacyLevel: 'mask'`. Elements marked to be
+masked or hidden in replay (`data-oodle-privacy`, `.oodle-privacy-*`,
+`.rr-mask`, `.rr-block`) never have their text sent, whatever the setting.
+
+### Query strings
+
+The SDK removes the query string from `view_url`, `referrer_url` and
+`resource_url`, because a query string can hold tokens or personal data.
+Two places keep the full query string: the page URL that session replay
+records, and the `url.full` attribute on browser trace spans. Keep secrets
+out of URLs, or turn off `sessionReplay` for pages that have them in the URL.
 
 To keep a parameter that only identifies page state, such as the ID of the
 record a page shows, list its name in `viewUrlQueryParams`:
@@ -134,6 +244,8 @@ record a page shows, list its name in `viewUrlQueryParams`:
 - Parameters after `#` in hash-based routes are not kept.
 - A value that is not an array of strings is ignored, with a console
   warning.
+
+### Session replay
 
 The `privacyLevel` setting controls input masking in session replay:
 

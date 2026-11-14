@@ -1,0 +1,406 @@
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+
+/**
+ * The privacy options, checked on the events that carry each
+ * field. The privacy module is real; only the rest of the SDK
+ * around the event producers is stubbed.
+ */
+
+const config: Record<string, unknown> = {
+  instanceId: 'inst',
+  apiKey: 'key',
+  endpoint: 'https://localhost',
+  service: 'test',
+};
+
+vi.mock('../core/config', () => ({
+  getConfig: () => config,
+}));
+
+vi.mock('../core/session', () => ({
+  getSessionId: () => 'session-1',
+  isSessionSampled: () => true,
+  incrementSessionCount: () => {},
+  getSessionCounts: () => ({
+    viewCount: 0,
+    errorCount: 0,
+    actionCount: 0,
+  }),
+}));
+
+vi.mock('../core/user', () => ({
+  getUserId: () => 'u1',
+  getUserName: () => 'Jane Doe',
+  getUserEmail: () => 'jane@acme.io',
+  getUserStatus: () => 'anonymous',
+}));
+
+vi.mock('../core/flags', () => ({
+  getFeatureFlags: () => ({}),
+}));
+
+vi.mock('../core/telemetry', () => ({
+  incrTelemetry: () => {},
+}));
+
+vi.mock('../core/otel-bridge', () => ({
+  getActiveTraceContext: () => null,
+}));
+
+vi.mock('../replay/recorder', () => ({
+  isReplayActive: () => false,
+  hasReplayFlushed: () => false,
+}));
+
+const enqueued: Record<string, any>[] = [];
+
+vi.mock('../core/transport', () => ({
+  enqueue: (_key: string, item: Record<string, unknown>) => {
+    enqueued.push(item);
+  },
+  upsert: () => {},
+  flushAll: () => {},
+  isServerRateLimited: () => false,
+}));
+
+const origin = window.location.origin;
+
+describe('privacy options on events', () => {
+  let faro: typeof import('./faro');
+  let privacy: typeof import('../core/privacy');
+  const realError = console.error;
+  const realWarn = console.warn;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    enqueued.length = 0;
+    if (!(performance as any).addEventListener) {
+      (performance as any).addEventListener = () => {};
+      (performance as any).removeEventListener = () => {};
+    }
+    privacy = await import('../core/privacy');
+    faro = await import('./faro');
+  });
+
+  afterEach(() => {
+    faro.destroyEvents();
+    console.error = realError;
+    console.warn = realWarn;
+    window.history.replaceState(null, '', '/');
+  });
+
+  const consoleEvents = () =>
+    enqueued.filter((e) => e.event_type === 'console');
+
+  it('masks view_url and view_url_path', () => {
+    privacy.configurePrivacy({
+      urlPathPatterns: ['/projects/:project/tables/:table'],
+    });
+    window.history.replaceState(
+      null,
+      '',
+      '/projects/acme/tables/salaries?token=1',
+    );
+    faro.trackPageView();
+    expect(enqueued[0].view_url).toBe(
+      origin + '/projects/:project/tables/:table',
+    );
+    expect(enqueued[0].view_url_path).toBe(
+      '/projects/:project/tables/:table',
+    );
+  });
+
+  it('keeps view_url_path unchanged when nothing is set', () => {
+    window.history.replaceState(null, '', '/projects/acme');
+    faro.trackPageView();
+    expect(enqueued[0].view_url_path).toBe('/projects/acme');
+  });
+
+  it('sends user_agent empty with userAgent none', () => {
+    faro.trackPageView();
+    expect(enqueued[0].user_agent).toBe(navigator.userAgent);
+    privacy.configurePrivacy({ userAgent: 'none' });
+    faro.trackPageView();
+    expect(enqueued[1].user_agent).toBe('');
+    expect(enqueued[1].browser_name).toBeTruthy();
+  });
+
+  it('sends only the user id with userInfo id', () => {
+    faro.trackPageView();
+    expect(enqueued[0]).toMatchObject({
+      user_id: 'u1',
+      user_name: 'Jane Doe',
+      user_email: 'jane@acme.io',
+    });
+    privacy.configurePrivacy({ userInfo: 'id' });
+    faro.trackPageView();
+    expect(enqueued[1]).toMatchObject({
+      user_id: 'u1',
+      user_name: '',
+      user_email: '',
+      user_status: 'anonymous',
+    });
+  });
+
+  it('lets beforeSend change an event', () => {
+    config.beforeSend = (e: any) => {
+      e.view_url_path = '/redacted';
+      e.session_id = 'forged';
+    };
+    try {
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued[0].view_url_path).toBe('/redacted');
+    // The event's identity cannot be changed.
+    expect(enqueued[0].session_id).toBe('session-1');
+    expect(enqueued[0].event_type).toBe('view');
+  });
+
+  it('lets beforeSend replace or drop an event', () => {
+    config.beforeSend = (e: any) =>
+      e.event_type === 'custom' ? null : { ...e, extra: 1 };
+    try {
+      faro.trackCustomEvent('x');
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ event_type: 'view', extra: 1 });
+  });
+
+  it('accepts a frozen event returned by beforeSend', () => {
+    config.beforeSend = (e: any) => Object.freeze({ ...e, view_url_path: '/x' });
+    try {
+      expect(() => faro.trackPageView()).not.toThrow();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued[0]).toMatchObject({ view_url_path: '/x', event_type: 'view' });
+  });
+
+  it('drops events from an async beforeSend, and warns once', () => {
+    const warn = vi.fn();
+    console.warn = warn;
+    config.beforeSend = async (e: any) => e;
+    try {
+      faro.trackPageView();
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('drops the event when beforeSend throws, and warns once', () => {
+    const warn = vi.fn();
+    console.warn = warn;
+    config.beforeSend = () => {
+      throw new Error('boom');
+    };
+    try {
+      faro.initEvents();
+      faro.trackPageView();
+      faro.trackPageView();
+    } finally {
+      delete config.beforeSend;
+    }
+    expect(enqueued).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('records an Error logged to the console by name and message', () => {
+    console.error = () => {};
+    faro.initEvents();
+    console.error('save failed:', new TypeError('bad input'));
+    console.error(new Error(''));
+    // Not an Error, but shaped like one (another realm, a DOMException).
+    console.error({ name: 'AbortError', message: 'aborted', stack: '' });
+    expect(consoleEvents().map((e) => e.console_message)).toEqual([
+      'save failed: TypeError: bad input',
+      'Error',
+      'AbortError: aborted',
+    ]);
+  });
+
+  it('records zone.js rejections through its handler slot, once', () => {
+    // A stand-in for zone.js: it calls the handler in this slot
+    // for a rejected zone promise and fires no browser event.
+    const prev = vi.fn();
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    Zone['__zone_symbol__unhandledPromiseRejectionHandler'] = prev;
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      faro.captureZoneRejections(); // idempotent
+      const handler = Zone['__zone_symbol__unhandledPromiseRejectionHandler'];
+      // zone.js defaults: the bare error.
+      handler(new RangeError('zone boom'));
+      // Wrapped mode: the reason in `rejection`.
+      handler({ rejection: new TypeError('wrapped boom'), promise: {} });
+      // A native promise still fires the browser event.
+      const ev = new Event('unhandledrejection') as any;
+      ev.reason = new SyntaxError('native boom');
+      window.dispatchEvent(ev);
+      expect(prev).toHaveBeenCalledTimes(2);
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    expect(
+      enqueued
+        .filter((e) => e.event_type === 'error')
+        .map((e) => `${e.error_source}:${e.error_type}:${e.error_message}`),
+    ).toEqual([
+      'promise:RangeError:zone boom',
+      'promise:TypeError:wrapped boom',
+      'promise:SyntaxError:native boom',
+    ]);
+  });
+
+  it('records no zone.js rejection after the SDK stopped', () => {
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      faro.destroyEvents();
+      Zone['__zone_symbol__unhandledPromiseRejectionHandler'](new Error('late'));
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    expect(enqueued.filter((e) => e.event_type === 'error')).toHaveLength(0);
+  });
+
+  it('records a rejected Error once, however many paths report it', () => {
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      const err = new Error('twice');
+      Zone['__zone_symbol__unhandledPromiseRejectionHandler'](err);
+      const ev = new Event('unhandledrejection') as any;
+      ev.reason = err;
+      window.dispatchEvent(ev);
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    expect(enqueued.filter((e) => e.event_type === 'error')).toHaveLength(1);
+  });
+
+  it('keeps calling the console when recording fails', () => {
+    const inner = vi.fn();
+    console.error = inner;
+    faro.initEvents();
+    config.beforeSend = () => {
+      throw new Error('boom');
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      console.error('still logged');
+    } finally {
+      delete config.beforeSend;
+      warn.mockRestore();
+    }
+    expect(inner).toHaveBeenCalledWith('still logged');
+  });
+
+  it('records both console levels by default', () => {
+    console.error = () => {};
+    console.warn = () => {};
+    faro.initEvents();
+    console.error('e1');
+    console.warn('w1');
+    expect(consoleEvents().map((e) => e.console_level)).toEqual([
+      'error',
+      'warn',
+    ]);
+  });
+
+  it('does not wrap a level that is not recorded', () => {
+    const warn = vi.fn();
+    console.warn = warn;
+    console.error = () => {};
+    privacy.configurePrivacy({ consoleLevels: ['error'] });
+    faro.initEvents();
+    expect(console.warn).toBe(warn);
+    console.warn('w1');
+    console.error('e1');
+    expect(warn).toHaveBeenCalledWith('w1');
+    expect(consoleEvents().map((e) => e.console_level)).toEqual([
+      'error',
+    ]);
+  });
+
+  it('records no console output with an empty list', () => {
+    console.error = () => {};
+    privacy.configurePrivacy({ consoleLevels: [] });
+    faro.initEvents();
+    console.error('e1');
+    expect(consoleEvents()).toHaveLength(0);
+  });
+
+  it('scrubs console messages', () => {
+    console.error = () => {};
+    privacy.configurePrivacy({ errorMessages: 'scrub' });
+    faro.initEvents();
+    console.error('failed for', 'jane@acme.io');
+    expect(consoleEvents()[0].console_message).toBe('failed for <email>');
+  });
+
+  it('scrubs error events and their stack header', () => {
+    privacy.configurePrivacy({ errorMessages: 'scrub' });
+    faro.initEvents();
+    const err = new TypeError("no table 'salaries'");
+    window.dispatchEvent(
+      new ErrorEvent('error', {
+        message: "Uncaught TypeError: no table 'salaries'",
+        error: err,
+      }),
+    );
+    const ev = enqueued.find((e) => e.event_type === 'error')!;
+    expect(ev.error_message).toBe("Uncaught TypeError: no table '?'");
+    expect(ev.error_type).toBe('TypeError');
+    expect(ev.error_stack).not.toContain('salaries');
+  });
+
+  it('drops error messages with errorMessages none', () => {
+    privacy.configurePrivacy({ errorMessages: 'none' });
+    faro.initEvents();
+    const err = new Error('user 4111 not allowed on acme');
+    window.dispatchEvent(
+      new ErrorEvent('error', { message: 'Uncaught ' + err.message, error: err }),
+    );
+    const ev = enqueued.find((e) => e.event_type === 'error')!;
+    expect(ev.error_message).toBe('');
+    expect(ev.error_stack).not.toContain('acme');
+    expect(ev.error_type).toBe('Error');
+  });
+
+  it('strips the query from relative fetch URLs', async () => {
+    const orig = window.fetch;
+    window.fetch = vi.fn(async () => new Response('ok')) as any;
+    try {
+      privacy.configurePrivacy({ urlPathPatterns: ['/api/projects/:id'] });
+      faro.initEvents();
+      await window.fetch('/api/projects/acme?token=s3cret');
+      await new Promise((r) => setTimeout(r, 0));
+      const ev = enqueued.find((e) => e.event_type === 'resource')!;
+      expect(ev.resource_url).toBe('/api/projects/:id');
+    } finally {
+      faro.destroyEvents();
+      window.fetch = orig;
+    }
+  });
+});

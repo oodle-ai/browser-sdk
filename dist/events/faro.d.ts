@@ -7,6 +7,25 @@
 export declare function viewUrl(location: Pick<Location, 'origin' | 'pathname' | 'search'>, keep: readonly string[] | undefined): string;
 export declare function initEvents(): void;
 /**
+ * Records rejections of zone.js promises. Called once zone.js
+ * has loaded (browser tracing).
+ *
+ * zone.js replaces the global Promise, and the browser fires
+ * no `unhandledrejection` for a promise it did not create.
+ * zone.js's own bridge to that event does not work either: by
+ * default it hands the bare error to a `PromiseRejectionEvent`
+ * constructor, which throws for want of a promise, and the
+ * throw is swallowed. So no listener, however it was added,
+ * hears about these rejections. zone.js does call the handler
+ * in this slot, so the SDK wraps it.
+ *
+ * The native listener stays: promises zone.js does not own,
+ * such as those async functions return, still fire the
+ * browser's event. A rejection takes one path or the other,
+ * so none is recorded twice.
+ */
+export declare function captureZoneRejections(): void;
+/**
  * Records tab switches, so a replay can show that the user
  * left the tab and when (or whether) they came back.
  *

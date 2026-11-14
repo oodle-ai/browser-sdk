@@ -9,6 +9,8 @@ import {
 import { getConfig } from '../core/config';
 import type {
   NetworkBodiesConfig,
+  NetworkCapture,
+  RumEvent,
   NetworkHeadersConfig,
 } from '../core/config';
 import {
@@ -31,6 +33,23 @@ import {
   isServerRateLimited,
 } from '../core/transport';
 import { estimateJsonBytes } from '../core/size';
+import {
+  makeHeaderMatcher,
+  makeKeyMatcher,
+  redactBody,
+  type NameMatcher,
+} from '../core/redact';
+import { ORIGINAL, sdkWarn } from '../core/log';
+import {
+  consoleLevels,
+  maskPath,
+  sanitizeMessage,
+  sanitizeReferrer,
+  sanitizeResourceUrl,
+  sanitizeStack,
+  sendUserAgent,
+  userFields,
+} from '../core/privacy';
 import { tryConsume } from '../core/rate-limiter';
 import { incrTelemetry } from '../core/telemetry';
 import {
@@ -86,15 +105,6 @@ function isRateLimited(
   return false;
 }
 
-function stripQuery(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.origin + u.pathname;
-  } catch {
-    return url;
-  }
-}
-
 /**
  * The page URL without its query string, except for the
  * parameters in `viewUrlQueryParams`. Those stay, so that a
@@ -105,7 +115,7 @@ export function viewUrl(
   location: Pick<Location, 'origin' | 'pathname' | 'search'>,
   keep: readonly string[] | undefined,
 ): string {
-  const base = location.origin + location.pathname;
+  const base = location.origin + maskPath(location.pathname);
   // setConfig() already normalizes the option. Check again here,
   // because this runs for every event and must never throw.
   if (
@@ -143,9 +153,11 @@ function baseContext(): Record<string, unknown> {
   const config = getConfig();
   const ctx: Record<string, unknown> = {
     session_id: getSessionId(),
-    user_id: getUserId(),
-    user_name: getUserName(),
-    user_email: getUserEmail(),
+    ...userFields(
+      getUserId(),
+      getUserName(),
+      getUserEmail(),
+    ),
     user_status: getUserStatus(),
     service: config.service,
     env: config.env ?? '',
@@ -156,12 +168,14 @@ function baseContext(): Record<string, unknown> {
       config.viewUrlQueryParams,
     ),
     view_url_host: window.location.hostname,
-    view_url_path: window.location.pathname,
-    referrer_url: stripQuery(document.referrer),
+    view_url_path: maskPath(window.location.pathname),
+    referrer_url: sanitizeReferrer(document.referrer),
     device_type: cachedContext!.device_type,
     browser_name: cachedContext!.browser_name,
     os_name: cachedContext!.os_name,
-    user_agent: cachedContext!.user_agent,
+    user_agent: sendUserAgent()
+      ? cachedContext!.user_agent
+      : '',
     language: cachedContext!.language,
     session_view_count: counts.viewCount,
     session_error_count: counts.errorCount,
@@ -187,6 +201,47 @@ function scheduleIdleWork(fn: () => void) {
 
 const EVENTS_BATCH_KEY = 'events';
 
+/** Fields beforeSend cannot change: the event's identity. */
+const FIXED_FIELDS = ['session_id', 'event_type', 'timestamp'];
+let warnedBeforeSend = false;
+
+/**
+ * Runs the app's `beforeSend` on a finished event. Returns
+ * the event to send, or null to drop it. Fails closed: an
+ * event whose hook throws is dropped, because the hook may
+ * exist to remove something that must not be sent.
+ */
+function applyBeforeSend(
+  event: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const hook = getConfig().beforeSend;
+  if (typeof hook !== 'function') return event;
+  const fixed: Record<string, unknown> = {};
+  for (const f of FIXED_FIELDS) fixed[f] = event[f];
+  try {
+    const r = hook(event as RumEvent);
+    if (r === null || r === false) return null;
+    if (isThenable(r)) {
+      throw new Error('it returned a promise; it must be synchronous');
+    }
+    // A copy, so a frozen object returned by the hook works.
+    const base =
+      r && typeof r === 'object'
+        ? (r as Record<string, unknown>)
+        : event;
+    return { ...base, ...fixed };
+  } catch (e) {
+    if (!warnedBeforeSend) {
+      warnedBeforeSend = true;
+      sdkWarn(
+        'beforeSend failed. Events are dropped until it is' +
+          ` fixed: ${String(e)}`,
+      );
+    }
+    return null;
+  }
+}
+
 function emitEvent(
   buildData: () => Record<string, unknown>,
 ) {
@@ -196,12 +251,15 @@ function emitEvent(
   const eventType =
     data.event_type as string;
   if (isRateLimited(eventType)) return;
+  if (eventType === 'resource') applyNetworkHook(data);
+  // Counted before the context is built, as before
+  // beforeSend existed, so the session counts on an event
+  // include it. An event beforeSend drops still happened, so
+  // it still counts.
   incrementSessionCount(eventType);
-  const ctx = baseContext();
-  enqueue(
-    EVENTS_BATCH_KEY,
-    { ...ctx, ...data },
-  );
+  const event = applyBeforeSend({ ...baseContext(), ...data });
+  if (!event) return;
+  enqueue(EVENTS_BATCH_KEY, event);
 }
 
 function emitEventDeferred(
@@ -222,6 +280,8 @@ function emitViewEvent(
     data.event_type as string;
   incrementSessionCount(eventType);
   const ctx = baseContext();
+  const event = applyBeforeSend({ ...ctx, ...data });
+  if (!event) return;
   // One row per page load, so the key is the path and not
   // view_url. Each update replaces the whole row, so view_url is
   // the URL at the last metric: a record the user opened after the
@@ -231,11 +291,7 @@ function emitViewEvent(
     (ctx.session_id as string) +
     ':' +
     ctx.view_url_path;
-  upsert(
-    EVENTS_BATCH_KEY,
-    viewId,
-    { ...ctx, ...data },
-  );
+  upsert(EVENTS_BATCH_KEY, viewId, event);
 }
 
 export function initEvents() {
@@ -253,38 +309,38 @@ export function initEvents() {
 
 function initErrorTracking() {
   const onError = (event: ErrorEvent) => {
-    emitEvent(() => ({
-      event_type: 'error',
-      error_message: event.message ?? '',
-      error_type:
-        event.error?.name ?? 'Error',
-      error_stack:
-        event.error?.stack ?? '',
-      error_source: 'source',
-    }));
+    emitEvent(() => {
+      const raw = event.message ?? '';
+      // event.message is "Uncaught Error: msg"; the stack
+      // holds the error's own message.
+      const own =
+        typeof event.error?.message === 'string'
+          ? event.error.message
+          : raw;
+      return {
+        event_type: 'error',
+        error_message: sanitizeMessage(raw),
+        error_type:
+          event.error?.name ?? 'Error',
+        error_stack: sanitizeStack(
+          event.error?.stack ?? '',
+          own,
+        ),
+        error_source: 'source',
+      };
+    });
   };
 
   const onUnhandledRejection = (
     event: PromiseRejectionEvent,
-  ) => {
-    const reason = event.reason;
-    emitEvent(() => ({
-      event_type: 'error',
-      error_message:
-        reason?.message ?? String(reason),
-      error_type:
-        reason?.name ??
-        'UnhandledRejection',
-      error_stack: reason?.stack ?? '',
-      error_source: 'promise',
-    }));
-  };
+  ) => recordRejection(event.reason);
 
   window.addEventListener('error', onError);
   window.addEventListener(
     'unhandledrejection',
     onUnhandledRejection,
   );
+  rejectionsActive = true;
 
   teardownFns.push(() => {
     window.removeEventListener('error', onError);
@@ -292,7 +348,99 @@ function initErrorTracking() {
       'unhandledrejection',
       onUnhandledRejection,
     );
+    rejectionsActive = false;
   });
+}
+
+let rejectionsActive = false;
+
+/**
+ * Errors already recorded as rejections. zone.js can, in one
+ * configuration, both call its handler slot and dispatch the
+ * event to a listener it tracks, for the same rejection.
+ */
+const recordedRejections = new WeakSet<object>();
+
+function recordRejection(reason: any) {
+  if (reason !== null && typeof reason === 'object') {
+    if (recordedRejections.has(reason)) return;
+    recordedRejections.add(reason);
+  }
+  emitEvent(() => {
+    const raw = reason?.message ?? String(reason);
+    return {
+      event_type: 'error',
+      error_message: sanitizeMessage(raw),
+      error_type: reason?.name ?? 'UnhandledRejection',
+      error_stack: sanitizeStack(reason?.stack ?? '', raw),
+      error_source: 'promise',
+    };
+  });
+}
+
+let zoneHooked = false;
+
+/**
+ * Records rejections of zone.js promises. Called once zone.js
+ * has loaded (browser tracing).
+ *
+ * zone.js replaces the global Promise, and the browser fires
+ * no `unhandledrejection` for a promise it did not create.
+ * zone.js's own bridge to that event does not work either: by
+ * default it hands the bare error to a `PromiseRejectionEvent`
+ * constructor, which throws for want of a promise, and the
+ * throw is swallowed. So no listener, however it was added,
+ * hears about these rejections. zone.js does call the handler
+ * in this slot, so the SDK wraps it.
+ *
+ * The native listener stays: promises zone.js does not own,
+ * such as those async functions return, still fire the
+ * browser's event. A rejection takes one path or the other,
+ * so none is recorded twice.
+ */
+export function captureZoneRejections() {
+  const Zone = (globalThis as any).Zone;
+  if (zoneHooked || !Zone || typeof Zone.__symbol__ !== 'function') {
+    return;
+  }
+  zoneHooked = true;
+  const key = Zone.__symbol__('unhandledPromiseRejectionHandler');
+  const previous = Zone[key];
+  Zone[key] = function (this: unknown, e: any) {
+    if (rejectionsActive) {
+      try {
+        // zone.js's wrapper error carries the reason in
+        // `rejection` next to `promise`; with zone.js defaults
+        // the handler gets the reason itself.
+        recordRejection(
+          e &&
+            typeof e === 'object' &&
+            'rejection' in e &&
+            'promise' in e
+            ? e.rejection
+            : e,
+        );
+      } catch {
+        // Never keep the handler the app had from running.
+      }
+    }
+    if (typeof previous === 'function') {
+      return previous.call(this, e);
+    }
+  };
+}
+
+function isErrorLike(
+  v: unknown,
+): v is { name: string; message: string } {
+  return (
+    v instanceof Error ||
+    (typeof v === 'object' &&
+      v !== null &&
+      typeof (v as any).message === 'string' &&
+      typeof (v as any).name === 'string' &&
+      'stack' in v)
+  );
 }
 
 /**
@@ -320,6 +468,14 @@ function describeOversized(value: unknown): string {
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
+  // JSON.stringify(new Error('x')) is '{}': name, message and
+  // stack are not own enumerable properties. console.error(err)
+  // is the most common way apps log errors.
+  if (isErrorLike(value)) {
+    return value.message
+      ? `${value.name}: ${value.message}`
+      : value.name;
+  }
   // Measure before serialising. Truncating the result still
   // means building the whole string first, and the argument
   // that motivated this — an rrweb mutation batch, logged
@@ -354,35 +510,34 @@ function consoleMessage(args: unknown[]): string {
 }
 
 function initConsoleTracking() {
-  const original = {
-    error: console.error,
-    warn: console.warn,
-  };
-
-  console.error = (...args: unknown[]) => {
-    const msg = consoleMessage(args);
-    emitEvent(() => ({
-      event_type: 'console',
-      console_level: 'error',
-      console_message: msg,
-    }));
-    original.error.apply(console, args);
-  };
-
-  console.warn = (...args: unknown[]) => {
-    const msg = consoleMessage(args);
-    emitEvent(() => ({
-      event_type: 'console',
-      console_level: 'warn',
-      console_message: msg,
-    }));
-    original.warn.apply(console, args);
-  };
-
-  teardownFns.push(() => {
-    console.error = original.error;
-    console.warn = original.warn;
-  });
+  // A level that is not recorded is not wrapped either, so
+  // its calls cost the app nothing.
+  for (const level of consoleLevels()) {
+    const original = console[level];
+    const wrapper = (...args: unknown[]) => {
+      // The app's own console call must happen whatever
+      // recording it does.
+      try {
+        const msg = sanitizeMessage(consoleMessage(args));
+        emitEvent(() => ({
+          event_type: 'console',
+          console_level: level,
+          console_message: msg,
+        }));
+      } catch {
+        // Recording failed; the call itself still goes through.
+      }
+      original.apply(console, args);
+    };
+    // Lets SDK warnings reach the console without being
+    // recorded as the app's console events.
+    (wrapper as unknown as Record<string, unknown>)[ORIGINAL] =
+      original;
+    console[level] = wrapper;
+    teardownFns.push(() => {
+      console[level] = original;
+    });
+  }
 }
 
 const viewMetrics: Record<string, number> = {};
@@ -645,7 +800,7 @@ function initResourceTracking() {
           continue;
         }
 
-        const url = stripQuery(res.name);
+        const url = sanitizeResourceUrl(res.name);
         const dur = res.duration;
         const sz = res.transferSize ?? 0;
         const init = initiator;
@@ -776,13 +931,165 @@ function resolveUrlDecisions(
   };
 }
 
-const SENSITIVE_HEADERS = new Set([
-  'authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'proxy-authorization',
-]);
+let headerNamesFor: unknown = null;
+let headerMatcher: NameMatcher = makeHeaderMatcher(undefined);
+
+/**
+ * Whether a header must not be sent: the built-in pattern
+ * plus the app's `redactHeaders`. The matcher is rebuilt only
+ * when the option changes, since this runs for every
+ * captured header.
+ */
+function isSensitiveHeader(lowerName: string): boolean {
+  const extra = getConfig().redactHeaders;
+  if (extra !== headerNamesFor) {
+    headerNamesFor = extra;
+    headerMatcher = makeHeaderMatcher(extra);
+  }
+  return headerMatcher(lowerName);
+}
+
+/**
+ * Header names as they are sent: lowercase, without the
+ * sensitive ones.
+ */
+function redactHeaders(
+  h: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of Object.keys(h)) {
+    const lk = k.toLowerCase();
+    if (!isSensitiveHeader(lk)) out[lk] = h[k];
+  }
+  return out;
+}
+
+const CAPTURE_FIELDS = [
+  'request_headers',
+  'response_headers',
+  'request_body',
+  'response_body',
+] as const;
+
+let warnedNetworkHook = false;
+
+function isThenable(v: unknown): boolean {
+  return (
+    !!v &&
+    (typeof v === 'object' || typeof v === 'function') &&
+    typeof (v as { then?: unknown }).then === 'function'
+  );
+}
+
+function parseHeaderJson(
+  s: unknown,
+): Record<string, string> | undefined {
+  if (typeof s !== 'string' || !s) return undefined;
+  try {
+    const v = JSON.parse(s);
+    return v && typeof v === 'object' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function headerJson(h: unknown): string {
+  if (!h || typeof h !== 'object') return '';
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(h)) {
+    if (v === undefined || v === null) continue;
+    out[k.toLowerCase()] = String(v);
+  }
+  return Object.keys(out).length > 0
+    ? JSON.stringify(out)
+    : '';
+}
+
+let bodyKeysFor: unknown = null;
+let bodyKeyMatcher: NameMatcher = makeKeyMatcher(undefined);
+
+function sensitiveBodyKey(): NameMatcher {
+  const extra = getConfig().redactBodyKeys;
+  if (extra !== bodyKeysFor) {
+    bodyKeysFor = extra;
+    bodyKeyMatcher = makeKeyMatcher(extra);
+  }
+  return bodyKeyMatcher;
+}
+
+/**
+ * Redacts the headers and bodies a resource event captured,
+ * then runs `beforeSendNetwork` on them. Only events that
+ * captured something get here, so a page without
+ * `forwardNetworkHeaders` / `forwardNetworkBodies` never pays
+ * for it. Fails closed: if the hook throws or returns a
+ * promise, the captured headers and bodies are dropped and
+ * the timing event is sent without them.
+ */
+function applyNetworkHook(
+  d: Record<string, unknown>,
+): void {
+  if (!CAPTURE_FIELDS.some((f) => d[f])) return;
+  // Built-in redaction first, so neither hook ever sees the
+  // values it removes.
+  for (const f of ['request_body', 'response_body'] as const) {
+    if (typeof d[f] === 'string' && d[f]) {
+      d[f] = redactBody(d[f] as string, sensitiveBodyKey());
+    }
+  }
+  const hook = getConfig().beforeSendNetwork;
+  if (typeof hook !== 'function') return;
+  const capture: NetworkCapture = {
+    url: String(d.resource_url ?? ''),
+    method: String(d.resource_method ?? ''),
+    status: Number(d.resource_status ?? 0),
+    requestHeaders: parseHeaderJson(d.request_headers),
+    responseHeaders: parseHeaderJson(d.response_headers),
+    requestBody:
+      typeof d.request_body === 'string'
+        ? d.request_body
+        : undefined,
+    responseBody:
+      typeof d.response_body === 'string'
+        ? d.response_body
+        : undefined,
+  };
+  let out: NetworkCapture | null | void;
+  try {
+    const r = hook(capture);
+    if (isThenable(r)) {
+      throw new Error('it returned a promise; it must be synchronous');
+    }
+    out = r === undefined ? capture : r;
+  } catch (e) {
+    if (!warnedNetworkHook) {
+      warnedNetworkHook = true;
+      sdkWarn(
+        'beforeSendNetwork failed. Captured headers and' +
+          ` bodies are dropped until it is fixed: ${String(e)}`,
+      );
+    }
+    out = null;
+  }
+  for (const f of CAPTURE_FIELDS) delete d[f];
+  if (!out || typeof out !== 'object') return;
+  const max =
+    getConfig().forwardNetworkBodies?.maxBodySize ??
+    65536;
+  const reqH = headerJson(out.requestHeaders);
+  const resH = headerJson(out.responseHeaders);
+  if (reqH) d.request_headers = reqH;
+  if (resH) d.response_headers = resH;
+  if (typeof out.requestBody === 'string' && out.requestBody) {
+    d.request_body = truncateBody(out.requestBody, max);
+  }
+  if (
+    typeof out.responseBody === 'string' &&
+    out.responseBody
+  ) {
+    d.response_body = truncateBody(out.responseBody, max);
+  }
+}
 
 function headersToRecord(
   h:
@@ -799,14 +1106,14 @@ function headersToRecord(
   ) {
     (h as Headers).forEach((v, k) => {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = v;
       }
     });
   } else if (Array.isArray(h)) {
     for (const [k, v] of h) {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = v;
       }
     }
@@ -815,7 +1122,7 @@ function headersToRecord(
       h as Record<string, string>,
     )) {
       const lk = k.toLowerCase();
-      if (!SENSITIVE_HEADERS.has(lk)) {
+      if (!isSensitiveHeader(lk)) {
         out[lk] = (
           h as Record<string, string>
         )[k];
@@ -837,7 +1144,7 @@ function parseRawHeaders(
       .slice(0, idx)
       .trim()
       .toLowerCase();
-    if (SENSITIVE_HEADERS.has(k)) continue;
+    if (isSensitiveHeader(k)) continue;
     out[k] = line.slice(idx + 1).trim();
   }
   return out;
@@ -1077,7 +1384,7 @@ function wrapFetch(
             unknown
           > = {
             event_type: 'resource',
-            resource_url: stripQuery(url),
+            resource_url: sanitizeResourceUrl(url),
             resource_method: method,
             resource_status: status,
             resource_duration_ms: dur,
@@ -1155,7 +1462,7 @@ function wrapFetch(
               unknown
             > = {
               event_type: 'resource',
-              resource_url: stripQuery(url),
+              resource_url: sanitizeResourceUrl(url),
               resource_method: method,
               resource_status: 0,
               resource_duration_ms: dur,
@@ -1299,11 +1606,11 @@ function wrapXHR(
       try {
         const hdrs =
           (this as any).__oodleReqHeaders;
-        if (
-          hdrs &&
-          Object.keys(hdrs).length > 0
-        ) {
-          reqHdrsJson = JSON.stringify(hdrs);
+        // Recorded raw by setRequestHeader, so they get
+        // the same redaction as fetch headers here.
+        const kept = hdrs ? redactHeaders(hdrs) : {};
+        if (Object.keys(kept).length > 0) {
+          reqHdrsJson = JSON.stringify(kept);
         }
       } catch {}
     }
@@ -1331,7 +1638,7 @@ function wrapXHR(
             unknown
           > = {
             event_type: 'resource',
-            resource_url: stripQuery(xhrUrl),
+            resource_url: sanitizeResourceUrl(xhrUrl),
             resource_method: xhrMethod,
             resource_status: xhrThis.status,
             resource_duration_ms: dur,

@@ -1,5 +1,7 @@
 import {
+  type NetworkCapture,
   type OodleRumConfig,
+  type RumEvent,
   type OtelConfig,
   setConfig,
   getConfig,
@@ -42,6 +44,7 @@ import {
   initReplay,
   stopReplay,
 } from './replay/recorder';
+import { isActionTextMasked } from './core/privacy';
 import {
   initTelemetry,
   destroyTelemetry,
@@ -250,18 +253,25 @@ function setupClickTracking():
     if (!target) return;
 
     const selector = getSelector(target);
-    const text = (
-      target.textContent ?? ''
-    )
-      .trim()
-      .slice(0, 200);
     const tagName =
       target.tagName?.toLowerCase() ?? '';
-    const targetName = getTargetName(
-      target,
-      tagName,
-      text,
-    );
+    // A name the app chose for the element (or an ancestor)
+    // wins over its text, and is sent even when text is
+    // masked: it was written to be sent.
+    const chosenName = getChosenActionName(target);
+    const masked =
+      chosenName === null && isActionTextMasked(target);
+    const text =
+      chosenName ??
+      (masked
+        ? ''
+        : (target.textContent ?? '')
+            .trim()
+            .slice(0, 200));
+    const targetName =
+      chosenName !== null
+        ? `${tagName}[${chosenName}]`
+        : getTargetName(target, tagName, text, masked);
     const now = Date.now();
     const clickX = (e as MouseEvent).clientX;
     const clickY = (e as MouseEvent).clientY;
@@ -386,11 +396,30 @@ function setupClickTracking():
   };
 }
 
+const ACTION_NAME_ATTR = 'data-oodle-action-name';
+
+function getChosenActionName(el: HTMLElement): string | null {
+  try {
+    const named =
+      typeof el.closest === 'function'
+        ? el.closest(`[${ACTION_NAME_ATTR}]`)
+        : null;
+    const v = named?.getAttribute(ACTION_NAME_ATTR)?.trim();
+    return v ? v.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
 function getTargetName(
   el: HTMLElement,
   tagName: string,
   text: string,
+  masked = false,
 ): string {
+  // aria-label and title are text a user reads, and often
+  // hold the same data as the element's content.
+  if (masked) return getIdOrClassName(el, tagName);
   const ariaLabel =
     el.getAttribute('aria-label');
   if (ariaLabel) {
@@ -402,6 +431,13 @@ function getTargetName(
   if (shortText && shortText.length <= 80) {
     return `${tagName}[${shortText}]`;
   }
+  return getIdOrClassName(el, tagName);
+}
+
+function getIdOrClassName(
+  el: HTMLElement,
+  tagName: string,
+): string {
   if (el.id) return `${tagName}#${el.id}`;
   const classes = Array.from(
     el.classList ?? [],
@@ -425,7 +461,9 @@ function getSelector(el: HTMLElement): string {
 }
 
 export type {
+  NetworkCapture,
   OodleRumConfig,
+  RumEvent,
   OtelConfig,
   UserInfo,
 };

@@ -1,6 +1,11 @@
 import type { eventWithTime } from '@rrweb/types';
 import { getConfig } from '../core/config';
 import {
+  BLOCK_SELECTOR,
+  MASK_TEXT_SELECTOR,
+  sanitizeReplayUrl,
+} from '../core/privacy';
+import {
   getSessionId,
   isReplaySampled,
   nextReplaySegmentIndex,
@@ -42,6 +47,7 @@ const MAX_PENDING_BYTES = 8_000_000;
 
 const FULL_SNAPSHOT = 2;
 const INCREMENTAL_SNAPSHOT = 3;
+const META = 4;
 
 /**
  * Absolute ceiling on mutation events accepted per
@@ -606,6 +612,13 @@ function handleEvent(event: eventWithTime) {
     return;
   }
 
+  if (event.type === META) {
+    const data = event.data as { href?: string };
+    if (typeof data.href === 'string') {
+      data.href = sanitizeReplayUrl(data.href);
+    }
+  }
+
   if (event.type !== INCREMENTAL_SNAPSHOT) {
     flushMutationBatch();
     addToBuffer(event);
@@ -682,13 +695,6 @@ async function doStartRecording(): Promise<void> {
   // rrweb also honours its own `rr-block` class, so a
   // host app can exclude a subtree too large to record
   // without needing an SDK option for it.
-  const BLOCK_SELECTOR =
-    '[data-oodle-privacy="hidden"],' +
-    '.oodle-privacy-hidden';
-  const MASK_TEXT_SELECTOR =
-    '[data-oodle-privacy="mask"],' +
-    '.oodle-privacy-mask';
-
   const { record } = await import('rrweb');
 
   // A concurrent stop() (tab hidden, idle expiry) may

@@ -1,5 +1,33 @@
 import type { OodleRumConfig } from '../core/config';
 import { setOtelApi } from '../core/otel-bridge';
+import { captureZoneRejections } from '../events/faro';
+import {
+  rewritesFullUrls,
+  sanitizeSpanUrl,
+} from '../core/privacy';
+
+const URL_ATTRS = ['url.full', 'http.url'];
+
+/**
+ * Masks URL paths, and with `stripQueryStrings: 'all'` drops
+ * query strings, on spans as they end. Listed ahead of the
+ * batch processor, which holds the same span object and
+ * reads its attributes only when it exports.
+ */
+export const urlMaskingProcessor = {
+  onStart() {},
+  onEnd(span: { attributes: Record<string, unknown> }) {
+    const attrs = span.attributes;
+    for (const key of URL_ATTRS) {
+      const v = attrs[key];
+      if (typeof v === 'string') {
+        attrs[key] = sanitizeSpanUrl(v);
+      }
+    }
+  },
+  forceFlush: () => Promise.resolve(),
+  shutdown: () => Promise.resolve(),
+};
 
 export interface OtelConfig {
   enabled: boolean;
@@ -107,6 +135,9 @@ export async function initOtelTracing(
     new sdkTraceWeb.WebTracerProvider({
       resource,
       spanProcessors: [
+        ...(rewritesFullUrls()
+          ? [urlMaskingProcessor as any]
+          : []),
         new sdkTraceWeb.BatchSpanProcessor(
           exporter,
         ),
@@ -129,6 +160,10 @@ export async function initOtelTracing(
   });
 
   setOtelApi(otelApi.trace, otelApi.context);
+
+  // Loading context-zone installed zone.js, which replaces the
+  // global Promise; see captureZoneRejections.
+  captureZoneRejections();
 
   const instrumentations =
     autoInstrumentations.getWebAutoInstrumentations(

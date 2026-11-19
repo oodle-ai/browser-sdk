@@ -261,7 +261,12 @@ function attr(el: HTMLElement, name: string): string {
 
 /** A name the element gives itself, in the order a reader would use. */
 function ownName(el: HTMLElement): string {
-  const labels = (el as HTMLInputElement).labels;
+  // Only form fields read their labels: the lookup searches the whole
+  // document, and a label naming a button or a link is rare.
+  const labels =
+    el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA'
+      ? (el as HTMLInputElement).labels
+      : null;
   if (labels && labels.length > 0) {
     const label = labels[0] as HTMLElement;
     if (!isActionTextMasked(label)) return firstLine(visibleText(label));
@@ -322,40 +327,62 @@ function findActionName(target: HTMLElement): { el: HTMLElement; name: string } 
  * from a parent covers its children too, so these are cut out of it.
  */
 const KEEP_OUT_SELECTOR =
-  ACTION_MASK_SELECTOR + ',[contenteditable],input,textarea,select,script,style';
+  ACTION_MASK_SELECTOR +
+  ',[contenteditable],input,textarea,select,script,style,template,noscript,[hidden]';
 
-function visibleText(el: HTMLElement): string {
-  let hasKeptOut = true;
-  try {
-    hasKeptOut = el.querySelector(KEEP_OUT_SELECTOR) !== null;
-  } catch {
-    hasKeptOut = true;
-  }
-  if (!hasKeptOut) {
-    const t = (el as HTMLElement & { innerText?: string }).innerText;
-    return (typeof t === 'string' && t ? t : el.textContent ?? '').trim();
-  }
-  // Collect the text outside the kept-out parts. Each text node is its
-  // own line, so a name is never joined across a cut-out part.
-  const lines: string[] = [];
-  const walk = (node: Node) => {
+/**
+ * Elements that start a new line. A name is the first line a user
+ * reads, and these give the line breaks without asking the browser to
+ * lay out the page, which reading innerText would do on every click.
+ */
+const BLOCK_TAGS = new Set([
+  'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'BR', 'DD', 'DETAILS', 'DIV', 'DL', 'DT',
+  'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5',
+  'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'SUMMARY',
+  'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'UL',
+]);
+
+/**
+ * The text a user reads on an element, up to `limit` characters, with a
+ * line break at each block element. It stops once it has the text it
+ * needs, so a click on a large container reads only its first rows.
+ */
+function visibleText(el: HTMLElement, limit = 200): string {
+  let out = '';
+  let line = '';
+  const endLine = () => {
+    const t = line.replace(/\s+/g, ' ').trim();
+    if (t) out += (out ? '\n' : '') + t;
+    line = '';
+  };
+  const walk = (node: Node): boolean => {
     for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (out.length + line.length >= limit) return false;
       if (c.nodeType === 3) {
-        const t = (c.nodeValue ?? '').trim();
-        if (t) lines.push(t);
+        line += c.nodeValue ?? '';
       } else if (c.nodeType === 1) {
-        let out = true;
+        let keptOut = true;
         try {
-          out = (c as Element).matches(KEEP_OUT_SELECTOR);
+          keptOut = (c as Element).matches(KEEP_OUT_SELECTOR);
         } catch {
-          out = true;
+          keptOut = true;
         }
-        if (!out) walk(c);
+        if (keptOut) {
+          // Text on either side of a cut-out part is never joined.
+          endLine();
+          continue;
+        }
+        const block = BLOCK_TAGS.has((c as Element).tagName);
+        if (block) endLine();
+        if (!walk(c)) return false;
+        if (block) endLine();
       }
     }
+    return true;
   };
   walk(el);
-  return lines.join('\n');
+  endLine();
+  return out.slice(0, limit);
 }
 
 // When the user last changed a field or scrolled.

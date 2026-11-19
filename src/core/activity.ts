@@ -42,7 +42,9 @@ function notify(e: ActivityEvent) {
   }
 }
 
-const notifyDom = () => notify({ kind: 'dom' });
+// One shared event: DOM changes come often, and need no fields.
+const DOM_EVENT: ActivityEvent = { kind: 'dom' };
+const notifyDom = () => notify(DOM_EVENT);
 
 function ensureObserver() {
   if (observer || typeof MutationObserver === 'undefined') return;

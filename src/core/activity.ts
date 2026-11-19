@@ -150,13 +150,17 @@ export function waitForIdle(
   listeners.add(onActivity);
   ensureObserver();
   armIdle();
-  maxTimer = setTimeout(() => {
-    finish({
-      endMs: lastActivity,
-      hadActivity: lastActivity !== null,
-      timedOut: true,
-    });
-  }, maxWaitMs);
+  // An infinite wait has no timer: setTimeout would read Infinity as 0
+  // and end the wait at once.
+  if (Number.isFinite(maxWaitMs)) {
+    maxTimer = setTimeout(() => {
+      finish({
+        endMs: lastActivity,
+        hadActivity: lastActivity !== null,
+        timedOut: true,
+      });
+    }, maxWaitMs);
+  }
 
   return () => {
     finished = true;

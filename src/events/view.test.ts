@@ -153,6 +153,35 @@ describe('views', () => {
     expect(last.view_loading_time_ms).toBeLessThan(500);
   });
 
+  it('waits past 10 seconds for a page that keeps loading', async () => {
+    window.history.pushState(null, '', '/busy');
+    const id = view.currentViewId();
+    // A DOM change every 80 ms for 15 seconds: the page never goes idle
+    // for 100 ms until then.
+    for (let t = 0; t < 15_000; t += 80) {
+      await vi.advanceTimersByTimeAsync(80);
+      document.body.appendChild(document.createElement('i'));
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    const last = updates(id).at(-1)!;
+    expect(last.view_loading_time_ms).toBeGreaterThanOrEqual(14_900);
+    expect(last.view_loading_time_ms).toBeLessThan(15_500);
+  });
+
+  it('gives no loading time to a load that ends after the tab was hidden', async () => {
+    window.history.pushState(null, '', '/hidden');
+    const id = view.currentViewId();
+    await vi.advanceTimersByTimeAsync(40);
+    document.body.appendChild(document.createElement('i'));
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(60);
+    document.body.appendChild(document.createElement('i'));
+    await vi.advanceTimersByTimeAsync(500);
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    expect(updates(id).every((u) => !u.view_loading_time_ms)).toBe(true);
+  });
+
   it('ends the view in its own session and starts one in the next', () => {
     const first = view.currentViewId();
     sessionId = 'session-2';

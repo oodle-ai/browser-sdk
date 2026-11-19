@@ -52,6 +52,8 @@ interface ViewState {
   endEpoch?: number;
   /** The update that ended the view with its session was sent. */
   expirySent?: boolean;
+  /** When the tab was first hidden during this view, as epoch ms. */
+  hiddenAt?: number;
   actionCount: number;
   errorCount: number;
   resourceCount: number;
@@ -243,18 +245,31 @@ function endView() {
 }
 
 function measureLoading(v: ViewState) {
-  v.cancelIdle = waitForIdle(v.startEpoch, (r) => {
-    v.cancelIdle = null;
-    if (current !== v) return;
-    let loading = r.endMs !== null && !r.timedOut ? r.endMs - v.startEpoch : 0;
-    if (v.loadingType === 'initial_load') {
-      // The page load is not over before the load event, even
-      // when the DOM settled earlier.
-      loading = Math.max(loading, v.vitals.load_event_ms ?? 0);
-    }
-    v.loadingTimeMs = Math.max(0, loading);
-    flushViewUpdate();
-  });
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    v.hiddenAt = v.startEpoch;
+  }
+  // No time limit: a page that keeps loading is still loading. With a
+  // limit, a busy page timed out and was given the load event as its
+  // loading time, which is too short. The wait ends with the view.
+  v.cancelIdle = waitForIdle(
+    v.startEpoch,
+    (r) => {
+      v.cancelIdle = null;
+      if (current !== v) return;
+      let loading = r.endMs !== null && r.hadActivity ? r.endMs - v.startEpoch : 0;
+      if (v.loadingType === 'initial_load') {
+        // The page load is not over before the load event, even
+        // when the DOM settled earlier.
+        loading = Math.max(loading, v.vitals.load_event_ms ?? 0);
+      }
+      // A page in a hidden tab is slowed by the browser, so a load that
+      // ends after the tab was hidden has no true loading time.
+      if (v.hiddenAt !== undefined && v.startEpoch + loading > v.hiddenAt) return;
+      v.loadingTimeMs = Math.max(0, loading);
+      flushViewUpdate();
+    },
+    Infinity,
+  );
 }
 
 function startView(loadingType: ViewState['loadingType'], startEpoch: number, startPerf: number) {
@@ -369,24 +384,25 @@ function initPerViewVitals() {
     }
     if (changed) scheduleUpdate();
   });
-  observe(
-    'event',
-    (entries) => {
-      const v = current;
-      if (!v) return;
-      let changed = false;
-      for (const e of entries as any[]) {
-        if (!e.interactionId || e.startTime < v.startPerf) continue;
-        const prev = v.interactions.get(e.interactionId) ?? 0;
-        if (e.duration > prev) {
-          v.interactions.set(e.interactionId, e.duration);
-          changed = true;
-        }
+  const onInteractions = (entries: PerformanceEntry[]) => {
+    const v = current;
+    if (!v) return;
+    let changed = false;
+    for (const e of entries as any[]) {
+      if (!e.interactionId || e.startTime < v.startPerf) continue;
+      const prev = v.interactions.get(e.interactionId) ?? 0;
+      if (e.duration > prev) {
+        v.interactions.set(e.interactionId, e.duration);
+        changed = true;
       }
-      if (changed) scheduleUpdate();
-    },
-    { durationThreshold: 40 },
-  );
+    }
+    if (changed) scheduleUpdate();
+  };
+  // Interactions faster than 40 ms are not reported, to keep the work
+  // small. The first input is reported at any duration, so a page whose
+  // interactions are all fast still gets an INP instead of none.
+  observe('event', onInteractions, { durationThreshold: 40 });
+  observe('first-input', onInteractions);
 }
 
 function initPageLoadVitals(v: ViewState) {
@@ -465,7 +481,10 @@ export function initViews(
   // Hidden: the last chance to send while the page may die.
   // The view stays active; the user may come back.
   const onHidden = () => {
-    if (document.visibilityState === 'hidden') flushViewUpdate();
+    if (document.visibilityState === 'hidden') {
+      if (current && current.hiddenAt === undefined) current.hiddenAt = Date.now();
+      flushViewUpdate();
+    }
   };
   document.addEventListener('visibilitychange', onHidden);
   const onPageHide = () => {

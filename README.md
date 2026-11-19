@@ -171,10 +171,12 @@ and when it ends (`view_is_active: 0`). Every send has a higher
 has `view_is_new: 1`.
 
 A view reports its loading time (until the page has no pending request
-and no DOM change for 100 ms), time spent, and how many actions,
+and no DOM change for 100 ms, with no time limit; a load that ends after
+the tab was hidden has none), time spent, and how many actions,
 errors, resources, long tasks and frustrations happened in it. LCP,
 FCP, TTFB and FID are page load vitals and are on the `initial_load`
-view only. CLS and INP are measured for each view.
+view only. CLS and INP are measured for each view; INP includes the first input
+at any duration, so a page with only fast interactions still has one.
 
 A view ends with its session. When the session expires (15 minutes
 without activity, or 4 hours), the view sends one last update dated at

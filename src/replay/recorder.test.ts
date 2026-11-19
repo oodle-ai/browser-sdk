@@ -61,6 +61,7 @@ let rateLimited = false;
 let exitFlushHook: (() => void) | null = null;
 
 vi.mock('../core/transport', () => ({
+  onPageExit: () => () => {},
   enqueue: (
     key: string,
     payload: any,

@@ -1383,12 +1383,12 @@ function wrapFetch(
     const start = performance.now();
     const decisions =
       resolveUrlDecisions(url);
-    requestStarted();
+    const requestIndex = requestStarted();
     let ended = false;
     const endActivity = () => {
       if (!ended) {
         ended = true;
-        requestEnded();
+        requestEnded(requestIndex);
       }
     };
 
@@ -1698,7 +1698,7 @@ function wrapXHR(
 
     const start = performance.now();
     const xhrThis = this;
-    requestStarted();
+    const requestIndex = requestStarted();
     const tid = traceId;
     const sid = spanId;
     const reqBody = requestBody;
@@ -1708,7 +1708,7 @@ function wrapXHR(
     this.addEventListener(
       'loadend',
       () => {
-        requestEnded();
+        requestEnded(requestIndex);
         const dur = Math.round(
           performance.now() - start,
         );

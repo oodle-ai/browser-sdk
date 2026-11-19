@@ -204,6 +204,47 @@ describe('click actions', () => {
     expect(JSON.stringify(sent[0])).not.toContain('Jane');
   });
 
+  it('calls a click dead when only a request from before it ends', async () => {
+    await load();
+    const activity = await import('./core/activity');
+    const poll = activity.requestStarted();
+    document.body.innerHTML = '<div id="d">Report</div>';
+    clickOn('d');
+    await vi.advanceTimersByTimeAsync(20);
+    activity.requestEnded(poll);
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'dead_click', is_frustration: 1 });
+  });
+
+  it('does not call a click dead when it starts a request', async () => {
+    await load();
+    const activity = await import('./core/activity');
+    document.body.innerHTML = '<div id="d">Report</div>';
+    clickOn('d');
+    await vi.advanceTimersByTimeAsync(20);
+    const r = activity.requestStarted();
+    await vi.advanceTimersByTimeAsync(500);
+    activity.requestEnded(r);
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+    expect(sent[0].action_loading_time_ms).toBeGreaterThanOrEqual(500);
+  });
+
+  it('send a click still in progress when the page goes away', async () => {
+    await load();
+    const activity = await import('./core/activity');
+    document.body.innerHTML = '<a id="l" href="/next">Home</a>';
+    clickOn('l');
+    await vi.advanceTimersByTimeAsync(20);
+    activity.requestStarted();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(sent).toHaveLength(0);
+    action.sendPendingOnExit();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action_type: 'click', action_target: 'a[Home]', is_frustration: 0 });
+    expect(sent[0].action_loading_time_ms).toBeGreaterThanOrEqual(3000);
+  });
+
   it('does not call a click on a link dead', async () => {
     await load();
     document.body.innerHTML = '<a id="l" href="/next"><span id="t">Next</span></a>';

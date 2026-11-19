@@ -18,6 +18,7 @@
  */
 
 import { waitForIdle } from '../core/activity';
+import { onPageExit } from '../core/transport';
 import { generateId } from '../core/session';
 import { ACTION_MASK_SELECTOR, isActionTextMasked } from '../core/privacy';
 import { currentViewId, currentViewPath } from './view';
@@ -174,13 +175,45 @@ function closeChain() {
     flush();
     return;
   }
-  const poll = setInterval(() => {
+  const pending = { flush, poll: null as ReturnType<typeof setInterval> | null };
+  waitingChains.add(pending);
+  pending.poll = setInterval(() => {
     if (finished()) {
-      clearInterval(poll);
+      clearInterval(pending.poll!);
+      waitingChains.delete(pending);
       flush();
     }
   }, 50);
-  cancels.push(() => clearInterval(poll));
+  cancels.push(() => {
+    clearInterval(pending.poll!);
+    waitingChains.delete(pending);
+  });
+}
+
+/** Closed chains whose clicks still wait for the page to go idle. */
+const waitingChains = new Set<{ flush: () => void; poll: ReturnType<typeof setInterval> | null }>();
+
+/**
+ * Sends every click still in progress when the page goes away. A click
+ * with no response ends within 100 ms, so one still waiting got a
+ * response: it is sent as a click, with its loading time up to now.
+ * Without this, the click that left the page, often a link, is lost.
+ */
+export function sendPendingOnExit() {
+  const now = Date.now();
+  for (const a of inFlight) {
+    if (a.done) continue;
+    a.hadActivity = true;
+    a.userInput = lastUserInputMs >= a.startMs;
+    a.loadingTimeMs = Math.max(0, now - a.startMs);
+    a.done = true;
+  }
+  if (chain) closeChain();
+  for (const w of [...waitingChains]) {
+    if (w.poll) clearInterval(w.poll);
+    waitingChains.delete(w);
+    w.flush();
+  }
 }
 
 /** A click on a label is a click on the control it names. */
@@ -402,10 +435,12 @@ export function initActions(emitAction: EmitAction) {
   const input = () => {
     lastUserInputMs = Date.now();
   };
+  const removeExit = onPageExit(sendPendingOnExit);
   document.addEventListener('click', handler, { capture: true, passive: true });
   document.addEventListener('input', input, { capture: true, passive: true });
   document.addEventListener('scroll', input, { capture: true, passive: true });
   teardown = () => {
+    removeExit();
     document.removeEventListener('click', handler, {
       capture: true,
     } as EventListenerOptions);

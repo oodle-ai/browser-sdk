@@ -14,8 +14,9 @@
  */
 export declare const IDLE_MS = 100;
 export declare const MAX_WAIT_MS = 10000;
-export declare function requestStarted(): void;
-export declare function requestEnded(): void;
+/** Returns the request's index, to pass to `requestEnded`. */
+export declare function requestStarted(): number;
+export declare function requestEnded(index: number): void;
 export declare function pendingRequestCount(): number;
 export interface ActivityResult {
     /** Epoch ms of the last activity, or null when there was none. */

@@ -63,6 +63,7 @@ vi.mock('../replay/recorder', () => ({
 const enqueued: Record<string, any>[] = [];
 
 vi.mock('../core/transport', () => ({
+  onPageExit: () => () => {},
   enqueue: (_key: string, item: Record<string, unknown>) => {
     enqueued.push(item);
   },

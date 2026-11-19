@@ -183,6 +183,10 @@ stretch the session or the view's time spent.
 
 ### Actions
 
+Only work that starts after a click counts as its response: a request
+already in flight, such as a background poll, neither ends nor extends
+it. A click still in progress when the page goes away is sent then.
+
 A click is sent when the page stops doing work because of it, with
 its loading time and the errors, resources and long tasks that
 happened during it. Events during an action carry its `action_id`.

@@ -43,6 +43,7 @@ type Ev = Record<string, any>;
 let queue: Ev[] = [];
 const keys = new Map<string, number>();
 vi.mock('../core/transport', () => ({
+  onPageExit: () => () => {},
   enqueue: (_k: string, item: Ev) => {
     queue.push(item);
   },

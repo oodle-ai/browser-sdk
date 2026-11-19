@@ -1,6 +1,13 @@
 export declare const SDK_VERSION: string;
 type Payload = Record<string, unknown>;
 /**
+ * Registers work that must run when the page goes away for good
+ * (pagehide), before the exit flush. Unlike the exit flush hook, it does
+ * not run when the tab is only hidden: work still in progress then may
+ * finish later. Returns a function that removes it.
+ */
+export declare function onPageExit(fn: () => void): () => void;
+/**
  * Lets the replay recorder re-base its stream when the
  * transport has to throw a segment away. rrweb events
  * are deltas, so a dropped segment invalidates every

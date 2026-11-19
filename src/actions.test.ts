@@ -124,12 +124,20 @@ describe('click actions', () => {
     });
   });
 
-  it('calls a checkbox that changed nothing dead', async () => {
+  it('does not call a checkbox that toggled dead', async () => {
     await load();
     document.body.innerHTML = '<input id="c" type="checkbox" />';
     clickOn('c');
     await settle();
-    expect(sent[0]).toMatchObject({ action_type: 'dead_click', is_frustration: 1 });
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+  });
+
+  it('calls a button that changed nothing dead', async () => {
+    await load();
+    document.body.innerHTML = '<input id="b" type="button" value="Apply" />';
+    clickOn('b');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'dead_click', action_target: 'input[Apply]' });
   });
 
   it('does not call clicks with scrolling a rage', async () => {

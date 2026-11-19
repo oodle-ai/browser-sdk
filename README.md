@@ -190,7 +190,8 @@ happened during it. Events during an action carry its `action_id`.
 one element within a second, sent as one action), `dead_click` (the
 page did nothing; not counted for text fields, selects, links, canvas,
 editable text, text selection, or when the user scrolls or types after
-the click; a checkbox or button that changes nothing is dead) and
+the click, or changes a field such as a checkbox; a button that
+changes nothing is dead) and
 `error_click` (a JavaScript error happened during the action). Clicks
 with scrolling or a text selection are never a rage click, and a rage
 click is also dead when any of its clicks got no response.

@@ -2165,10 +2165,10 @@ function Ic(e) {
   const t = (r) => kc(r), n = () => {
     Ai = Date.now();
   };
-  document.addEventListener("click", t, { capture: !0, passive: !0 }), document.addEventListener("keydown", n, { capture: !0, passive: !0 }), document.addEventListener("scroll", n, { capture: !0, passive: !0 }), Wt = () => {
+  document.addEventListener("click", t, { capture: !0, passive: !0 }), document.addEventListener("input", n, { capture: !0, passive: !0 }), document.addEventListener("scroll", n, { capture: !0, passive: !0 }), Wt = () => {
     document.removeEventListener("click", t, {
       capture: !0
-    }), document.removeEventListener("keydown", n, { capture: !0 }), document.removeEventListener("scroll", n, { capture: !0 });
+    }), document.removeEventListener("input", n, { capture: !0 }), document.removeEventListener("scroll", n, { capture: !0 });
   };
 }
 function ki() {
@@ -3745,7 +3745,7 @@ const gl = {
       e.replaySampleRate ?? 100
     ), ge = !0, Ho(), zu(), Vr(), zs(), ra(), Ha(() => {
       Vr();
-    }), e.sessionReplay !== !1 && qo() && Au(), Uu(), e.openTelemetry && import("./tracing-Bdx6h_3K.js").then(
+    }), e.sessionReplay !== !1 && qo() && Au(), Uu(), e.openTelemetry && import("./tracing-B0S6ILPw.js").then(
       (t) => t.initOtelTracing(e)
     ).catch((t) => {
       console.warn(

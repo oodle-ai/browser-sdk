@@ -285,7 +285,7 @@ function visibleText(el: HTMLElement): string {
   return (typeof t === 'string' && t ? t : el.textContent ?? '').trim();
 }
 
-// When the user last typed or scrolled.
+// When the user last changed a field or scrolled.
 let lastUserInputMs = 0;
 
 export function onClick(e: MouseEvent) {
@@ -331,8 +331,9 @@ export function onClick(e: MouseEvent) {
   cancels.push(
     waitForIdle(a.startMs, (r) => {
       a.hadActivity = r.hadActivity;
-      // A user who scrolls or types after the click got on with the
-      // page; the click was not ignored.
+      // A user who scrolls or changes a field after the click got on
+      // with the page: typing, or a checkbox that toggled, is a response
+      // even when the page shows no other change.
       a.userInput = lastUserInputMs >= a.startMs;
       a.loadingTimeMs =
         r.endMs !== null && !r.timedOut ? Math.max(0, r.endMs - a.startMs) : 0;
@@ -362,13 +363,13 @@ export function initActions(emitAction: EmitAction) {
     lastUserInputMs = Date.now();
   };
   document.addEventListener('click', handler, { capture: true, passive: true });
-  document.addEventListener('keydown', input, { capture: true, passive: true });
+  document.addEventListener('input', input, { capture: true, passive: true });
   document.addEventListener('scroll', input, { capture: true, passive: true });
   teardown = () => {
     document.removeEventListener('click', handler, {
       capture: true,
     } as EventListenerOptions);
-    document.removeEventListener('keydown', input, { capture: true } as EventListenerOptions);
+    document.removeEventListener('input', input, { capture: true } as EventListenerOptions);
     document.removeEventListener('scroll', input, { capture: true } as EventListenerOptions);
   };
 }

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let sessionId = 'session-1';
 let renew: ((prev: string, next: string) => void) | null = null;
+let endedAt: number | null = null;
 
 vi.mock('web-vitals', () => ({
   onLCP: () => {},
@@ -18,6 +19,7 @@ vi.mock('web-vitals', () => ({
 vi.mock('../core/session', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => sessionId,
+  sessionEndedAt: () => endedAt,
   onSessionRenewed: (cb: any) => {
     renew = cb;
     return () => {
@@ -37,6 +39,7 @@ beforeEach(async () => {
   vi.useFakeTimers();
   vi.resetModules();
   sessionId = 'session-1';
+  endedAt = null;
   sent = [];
   window.history.replaceState(null, '', '/start');
   view = await import('./view');
@@ -84,6 +87,25 @@ describe('views', () => {
     view.countInView({ event_type: 'action', view_id: first });
     expect(updates(first).at(-1)).toMatchObject({ view_action_count: 1, view_is_active: 0 });
     expect(updates(next).at(-1)!.view_action_count ?? 0).toBe(0);
+  });
+
+  it('ends a view with its session and sends nothing after', () => {
+    const id = view.currentViewId();
+    const start = Date.parse(updates(id)[0].view_start);
+    // The session timed out 15 minutes after its last activity; the tab
+    // wakes up hours later and hides again.
+    endedAt = start + 20 * 60_000;
+    vi.setSystemTime(start + 5 * 60 * 60_000);
+    view.flushViewUpdate();
+    const last = updates(id).at(-1)!;
+    expect(last.view_is_active).toBe(0);
+    expect(Date.parse(last.timestamp)).toBe(endedAt);
+    expect(last.view_time_spent_ms).toBe(20 * 60_000);
+    expect(view.currentViewId()).toBe('');
+    const n = updates(id).length;
+    view.flushViewUpdate();
+    view.countInView({ event_type: 'resource' });
+    expect(updates(id)).toHaveLength(n);
   });
 
   it('treats a hash route as a path', () => {

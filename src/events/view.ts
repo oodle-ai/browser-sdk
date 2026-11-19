@@ -27,6 +27,7 @@ import {
   generateId,
   getSessionId,
   onSessionRenewed,
+  sessionEndedAt,
 } from '../core/session';
 import { waitForIdle } from '../core/activity';
 
@@ -47,6 +48,10 @@ interface ViewState {
   urlPath: string;
   seq: number;
   active: boolean;
+  /** Set when the view ended with its session: the session's end. */
+  endEpoch?: number;
+  /** The update that ended the view with its session was sent. */
+  expirySent?: boolean;
   actionCount: number;
   errorCount: number;
   resourceCount: number;
@@ -126,7 +131,9 @@ function inpOf(v: ViewState): number {
 }
 
 function viewData(v: ViewState): Record<string, unknown> {
-  const now = Date.now();
+  // A view that ended with its session is dated at the session's end,
+  // not when the tab next woke up.
+  const now = v.endEpoch ?? Date.now();
   const vitals = v.vitals;
   const isPageLoad = v.loadingType === 'initial_load' && v.loadingTimeMs > 0;
   return {
@@ -166,6 +173,25 @@ function viewData(v: ViewState): Record<string, unknown> {
 
 function sendUpdate(v: ViewState) {
   if (!emit || !v.sessionId) return;
+  // A view lives no longer than its session. A tab left open used to
+  // keep sending updates under its expired session (on each hide, on
+  // each count), which stretched the session past its timeout and its
+  // maximum length and grew the view's time spent for hours. The view
+  // now ends at the session's end with one last update, and sends
+  // nothing after it.
+  if (v.endEpoch !== undefined) {
+    if (v.expirySent) return;
+    v.expirySent = true;
+  } else if (v.active) {
+    const ended = sessionEndedAt(v.sessionId);
+    if (ended !== null) {
+      v.active = false;
+      v.endEpoch = Math.max(v.startEpoch, ended);
+      v.expirySent = true;
+      if (v.cancelIdle) v.cancelIdle();
+      if (current === v) current = null;
+    }
+  }
   v.seq++;
   emit(viewData(v), v.sessionId);
 }

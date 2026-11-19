@@ -44,6 +44,13 @@ export declare function touchSession(): void;
  * session by itself.
  */
 export declare function getSessionId(): string;
+/**
+ * When the session `id` stopped being live: its last activity plus the
+ * inactivity timeout, or its maximum duration, whichever comes first.
+ * Null when the shared record is not that session (another tab renewed
+ * it) or the session is still live.
+ */
+export declare function sessionEndedAt(id: string): number | null;
 export declare function getTabId(): string;
 /** True when this tab's replay keeps the pre-tab storage path. */
 export declare function isLegacyReplayTab(): boolean;

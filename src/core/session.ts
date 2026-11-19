@@ -367,6 +367,23 @@ export function getSessionId(): string {
   return s.id;
 }
 
+/**
+ * When the session `id` stopped being live: its last activity plus the
+ * inactivity timeout, or its maximum duration, whichever comes first.
+ * Null when the shared record is not that session (another tab renewed
+ * it) or the session is still live.
+ */
+export function sessionEndedAt(id: string): number | null {
+  sharedReadAt = 0;
+  const s = loadShared();
+  if (!s || s.id !== id) return null;
+  const end = Math.min(
+    s.lastActivity + SESSION_TIMEOUT_MS,
+    s.createdAt + SESSION_MAX_DURATION_MS,
+  );
+  return Date.now() > end ? end : null;
+}
+
 export function getTabId(): string {
   return currentTab().tabId;
 }

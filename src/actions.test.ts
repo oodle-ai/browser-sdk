@@ -124,6 +124,42 @@ describe('click actions', () => {
     });
   });
 
+  it('does not call a click on a link dead', async () => {
+    await load();
+    document.body.innerHTML = '<a id="l" href="/next"><span id="t">Next</span></a>';
+    clickOn('t');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+  });
+
+  it('does not call a click dead when the user scrolls after it', async () => {
+    await load();
+    document.body.innerHTML = '<div id="d">Report</div>';
+    clickOn('d');
+    await vi.advanceTimersByTimeAsync(20);
+    document.dispatchEvent(new Event('scroll'));
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+  });
+
+  it('names a click inside a button after the button', async () => {
+    await load();
+    document.body.innerHTML = '<button><svg></svg><span id="icon"></span>Create API Key</button>';
+    clickOn('icon');
+    await settle();
+    expect(sent[0].action_target).toBe('button[Create API Key]');
+  });
+
+  it('names a large container by its first words, not its classes', async () => {
+    await load();
+    document.body.innerHTML =
+      '<div id="card" class="mt-4 p-4">Create API Key ' + 'store this key somewhere safe '.repeat(5) + '</div>';
+    clickOn('card');
+    await settle();
+    expect(sent[0].action_target).toMatch(/^div\[Create API Key store/);
+    expect(sent[0].action_target).toContain('…');
+  });
+
   it('does not call a click into a form field dead', async () => {
     await load();
     document.body.innerHTML = '<input id="i" />';

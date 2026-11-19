@@ -43,6 +43,8 @@ interface ClickAction {
   longTaskCount: number;
   loadingTimeMs: number;
   hadActivity: boolean;
+  /** The user typed or scrolled while the click was watched. */
+  userInput: boolean;
   done: boolean;
 }
 
@@ -90,7 +92,7 @@ export function countInAction(data: Record<string, unknown>) {
 function frustrations(a: ClickAction, rage: boolean): string[] {
   const f: string[] = [];
   if (rage) f.push('rage_click');
-  if (a.deadCandidate && !a.hadActivity) f.push('dead_click');
+  if (a.deadCandidate && !a.hadActivity && !a.userInput) f.push('dead_click');
   if (a.errorCount > 0) f.push('error_click');
   return f;
 }
@@ -188,19 +190,49 @@ function hasSelection(): boolean {
   }
 }
 
+/**
+ * Elements a click on any of whose children is a click on them: a click
+ * on the icon or the label inside a button is a click on the button, and
+ * is named after it.
+ */
+const CONTROL_SELECTOR =
+  'button,a[href],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="option"],summary,label';
+
+/**
+ * Clicks on these are not dead when the page shows no change: a link
+ * may navigate away, a canvas draws without DOM changes, and editable
+ * text takes the caret.
+ */
+const NOT_DEAD_SELECTOR = 'a[href],canvas,[contenteditable],[contenteditable] *';
+
+/** The text a user reads on an element, with its line breaks. */
+function visibleText(el: HTMLElement): string {
+  const t = (el as HTMLElement & { innerText?: string }).innerText;
+  return (typeof t === 'string' && t ? t : el.textContent ?? '').trim();
+}
+
+// When the user last typed or scrolled.
+let lastUserInputMs = 0;
+
 export function onClick(e: MouseEvent) {
   const target = e.target as HTMLElement | null;
   if (!target || typeof target.tagName !== 'string') return;
   const selector = getSelector(target);
-  const tagName = target.tagName.toLowerCase();
+  let control: HTMLElement | null = null;
+  try {
+    control = typeof target.closest === 'function' ? target.closest<HTMLElement>(CONTROL_SELECTOR) : null;
+  } catch {
+    control = null;
+  }
+  const named = control ?? target;
+  const tagName = named.tagName.toLowerCase();
   const chosenName = getChosenActionName(target);
-  const masked = chosenName === null && isActionTextMasked(target);
-  const text =
-    chosenName ?? (masked ? '' : (target.textContent ?? '').trim().slice(0, 200));
+  const masked = chosenName === null && isActionTextMasked(named);
+  const text = chosenName ?? (masked ? '' : visibleText(named).slice(0, 200));
   const targetName =
     chosenName !== null
       ? `${tagName}[${chosenName}]`
-      : getTargetName(target, tagName, text, masked);
+      : getTargetName(named, tagName, text, masked);
 
   const a: ClickAction = {
     id: generateId(),
@@ -212,18 +244,22 @@ export function onClick(e: MouseEvent) {
     text,
     x: e.clientX,
     y: e.clientY,
-    deadCandidate: !isFormField(target) && !hasSelection(),
+    deadCandidate: !isFormField(target) && !hasSelection() && !matchesSafe(target, NOT_DEAD_SELECTOR),
     errorCount: 0,
     resourceCount: 0,
     longTaskCount: 0,
     loadingTimeMs: 0,
     hadActivity: false,
+    userInput: false,
     done: false,
   };
   inFlight.push(a);
   cancels.push(
     waitForIdle(a.startMs, (r) => {
       a.hadActivity = r.hadActivity;
+      // A user who scrolls or types after the click got on with the
+      // page; the click was not ignored.
+      a.userInput = lastUserInputMs >= a.startMs;
       a.loadingTimeMs =
         r.endMs !== null && !r.timedOut ? Math.max(0, r.endMs - a.startMs) : 0;
       a.done = true;
@@ -248,11 +284,19 @@ export function initActions(emitAction: EmitAction) {
   destroyActions();
   emit = emitAction;
   const handler = (e: Event) => onClick(e as MouseEvent);
+  const input = () => {
+    lastUserInputMs = Date.now();
+  };
   document.addEventListener('click', handler, { capture: true, passive: true });
-  teardown = () =>
+  document.addEventListener('keydown', input, { capture: true, passive: true });
+  document.addEventListener('scroll', input, { capture: true, passive: true });
+  teardown = () => {
     document.removeEventListener('click', handler, {
       capture: true,
     } as EventListenerOptions);
+    document.removeEventListener('keydown', input, { capture: true } as EventListenerOptions);
+    document.removeEventListener('scroll', input, { capture: true } as EventListenerOptions);
+  };
 }
 
 export function destroyActions() {
@@ -290,9 +334,22 @@ function getTargetName(
   if (ariaLabel) return `${tagName}[${ariaLabel}]`;
   const title = el.getAttribute('title');
   if (title) return `${tagName}[${title}]`;
-  const shortText = text.split('\n')[0].trim();
-  if (shortText && shortText.length <= 80) return `${tagName}[${shortText}]`;
+  // The first line a user reads: a card is named by its heading, a
+  // table body by its first row. A long line is cut, not dropped, so a
+  // container is not named by its CSS classes.
+  const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  if (firstLine) {
+    return `${tagName}[${firstLine.length > 80 ? firstLine.slice(0, 79) + '…' : firstLine}]`;
+  }
   return getIdOrClassName(el, tagName);
+}
+
+function matchesSafe(el: HTMLElement, selector: string): boolean {
+  try {
+    return typeof el.closest === 'function' && el.closest(selector) !== null;
+  } catch {
+    return false;
+  }
 }
 
 function getIdOrClassName(el: HTMLElement, tagName: string): string {

@@ -176,6 +176,11 @@ errors, resources, long tasks and frustrations happened in it. LCP,
 FCP, TTFB and FID are page load vitals and are on the `initial_load`
 view only. CLS and INP are measured for each view.
 
+A view ends with its session. When the session expires (15 minutes
+without activity, or 4 hours), the view sends one last update dated at
+the session's end and then nothing more, so a tab left open does not
+stretch the session or the view's time spent.
+
 ### Actions
 
 A click is sent when the page stops doing work because of it, with
@@ -183,8 +188,15 @@ its loading time and the errors, resources and long tasks that
 happened during it. Events during an action carry its `action_id`.
 `action_frustration_types` lists `rage_click` (three or more clicks on
 one element within a second, sent as one action), `dead_click` (the
-page did nothing; not counted for form fields or text selection) and
-`error_click` (a JavaScript error happened during the action).
+page did nothing; not counted for form fields, links, canvas, editable
+text, text selection, or when the user scrolls or types after the
+click) and `error_click` (a JavaScript error happened during the
+action).
+
+An action is named after what the user clicked: a click inside a
+button or link is named after the button or link, and a click on any
+other element by the first line of its visible text, cut at 80
+characters.
 
 Every event has an `event_id`, the `view_id` of the view it happened
 in, and `browser_version` and `os_version`.

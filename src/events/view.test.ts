@@ -77,6 +77,15 @@ describe('views', () => {
     });
   });
 
+  it('counts an action on the view it started in after the route changed', () => {
+    const first = updates()[0].view_id;
+    window.history.pushState(null, '', '/next');
+    const next = view.currentViewId();
+    view.countInView({ event_type: 'action', view_id: first });
+    expect(updates(first).at(-1)).toMatchObject({ view_action_count: 1, view_is_active: 0 });
+    expect(updates(next).at(-1)!.view_action_count ?? 0).toBe(0);
+  });
+
   it('treats a hash route as a path', () => {
     const first = updates()[0].view_id;
     window.history.pushState(null, '', '/start#/settings');

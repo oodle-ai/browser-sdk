@@ -187,9 +187,25 @@ function scheduleUpdate() {
   }, UPDATE_THROTTLE_MS);
 }
 
+/**
+ * Views that ended recently, by id. An action belongs to the view it
+ * started in, and the click that changes the route ends after the next
+ * view started, so its count still goes to the ended view, as Datadog
+ * counts it. Datadog keeps an ended view's counts open for 5 minutes.
+ */
+const ENDED_VIEW_KEEP_MS = 5 * 60_000;
+const endedViews = new Map<string, { v: ViewState; until: number }>();
+
+function rememberEnded(v: ViewState) {
+  const now = Date.now();
+  for (const [id, e] of endedViews) if (e.until <= now) endedViews.delete(id);
+  endedViews.set(v.id, { v, until: now + ENDED_VIEW_KEEP_MS });
+}
+
 function endView() {
   const v = current;
   if (!v) return;
+  rememberEnded(v);
   if (v.cancelIdle) v.cancelIdle();
   if (updateTimer) {
     clearTimeout(updateTimer);
@@ -237,7 +253,15 @@ export function currentViewPath(): string {
  * view carries the same counts Datadog shows on it.
  */
 export function countInView(data: Record<string, unknown>) {
-  const v = current;
+  const id = typeof data.view_id === 'string' ? data.view_id : '';
+  let v = current;
+  let ended = false;
+  if (id && v?.id !== id) {
+    const e = endedViews.get(id);
+    if (!e || e.until <= Date.now()) return;
+    v = e.v;
+    ended = true;
+  }
   if (!v) return;
   switch (data.event_type) {
     case 'action':
@@ -259,7 +283,10 @@ export function countInView(data: Record<string, unknown>) {
     default:
       return;
   }
-  scheduleUpdate();
+  // An ended view gets one more update with the new count; it stays
+  // ended. Such counts are rare: a click that changed the route.
+  if (ended) sendUpdate(v);
+  else scheduleUpdate();
 }
 
 function collectNavigationTiming(v: ViewState) {
@@ -466,6 +493,7 @@ export function ensureView() {
 
 export function destroyViews() {
   endView();
+  endedViews.clear();
   for (const fn of teardown) fn();
   teardown = [];
   emit = null;

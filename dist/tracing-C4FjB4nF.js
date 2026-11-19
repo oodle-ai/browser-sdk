@@ -1,4 +1,4 @@
-import { r as g, s as U, c as P, a as h } from "./index-BJ9gDEBZ.js";
+import { r as g, s as U, c as P, a as h } from "./index-BnSsyK1K.js";
 const A = ["url.full", "http.url"], E = {
   onStart() {
   },

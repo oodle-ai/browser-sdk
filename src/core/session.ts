@@ -388,6 +388,7 @@ export function touchSession() {
   if (!isLive(s, now)) {
     if (!adoptLegacy(now)) {
       s = newSession(now);
+      settleNewSession(s);
     } else {
       s = loadShared();
     }
@@ -398,6 +399,35 @@ export function touchSession() {
     lastActivityWrite = now;
   }
   if (s) bindTab(s.id);
+}
+
+/** How long after starting a session a tab checks for one made beside it. */
+const SETTLE_MS = 100;
+/** Sessions created this close together were created by tabs racing. */
+const RACE_WINDOW_MS = 2000;
+
+/**
+ * Joins a session another tab created at the same moment. Tabs that
+ * wake together (a restored browser, a laptop opened) each find no live
+ * session and each create one; the shared record keeps the last write.
+ * A tab that finds a session there other than its own, created within
+ * the race window, joins it, so the tabs end in one session rather than
+ * one each.
+ */
+function settleNewSession(mine: SharedSession) {
+  setTimeout(() => {
+    sharedReadAt = 0;
+    const s = loadShared();
+    if (
+      s &&
+      s.id !== mine.id &&
+      isLive(s, Date.now()) &&
+      Math.abs(s.createdAt - mine.createdAt) <= RACE_WINDOW_MS &&
+      loadTab()?.sessionId === mine.id
+    ) {
+      bindTab(s.id);
+    }
+  }, SETTLE_MS);
 }
 
 /**
@@ -498,9 +528,45 @@ let visibleTimer: ReturnType<typeof setInterval> | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ['click', 'keydown', 'touchstart', 'scroll'];
 
+let tabChannel: BroadcastChannel | null = null;
+
+/**
+ * Gives this tab a new id when another open tab holds the same one. A
+ * duplicated tab, or one opened from another, starts with a copy of
+ * its sessionStorage, tab id included. Two tabs then wrote events and
+ * replay segments under one id, and their segments overwrote each
+ * other. The new tab says its id on a channel; a tab that has it
+ * answers, and the new tab takes a fresh id.
+ */
+function claimTabId() {
+  if (typeof BroadcastChannel === 'undefined') return;
+  try {
+    tabChannel = new BroadcastChannel('oodle_rum_tabs');
+  } catch {
+    tabChannel = null;
+    return;
+  }
+  const mine = currentTab().tabId;
+  const helloAt = Date.now();
+  tabChannel.onmessage = (e: MessageEvent) => {
+    const m = e.data as { type?: string; tabId?: string } | null;
+    const t = currentTab();
+    if (!m || m.tabId !== t.tabId) return;
+    if (m.type === 'hello') {
+      tabChannel?.postMessage({ type: 'taken', tabId: t.tabId });
+    } else if (m.type === 'taken' && t.tabId === mine && Date.now() - helloAt < 5000) {
+      t.tabId = generateId();
+      t.replaySegmentSeq = 0;
+      saveTabNow(t);
+    }
+  };
+  tabChannel.postMessage({ type: 'hello', tabId: mine });
+}
+
 export function initSessionListeners() {
   if (typeof document === 'undefined') return;
   destroySessionListeners();
+  claimTabId();
   // Scroll and key events come in bursts; one touch a second
   // is enough to keep a 15 minute timeout fresh.
   let lastTouch = 0;
@@ -552,6 +618,10 @@ export function destroySessionListeners() {
   if (visibleTimer) {
     clearInterval(visibleTimer);
     visibleTimer = null;
+  }
+  if (tabChannel) {
+    tabChannel.close();
+    tabChannel = null;
   }
   if (storageHandler) {
     window.removeEventListener('storage', storageHandler);

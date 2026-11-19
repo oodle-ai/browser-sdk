@@ -183,6 +183,53 @@ describe('sessions across tabs', () => {
     s.touchSession();
     expect(s.getSessionId()).toBe('other');
   });
+
+  it('joins a session another tab created at the same moment', async () => {
+    const s = await reload();
+    s.touchSession();
+    const mine = s.getSessionId();
+    // Another tab woke too and wrote its own session over ours.
+    localStorage.setItem(
+      '__oodle_session_v2',
+      JSON.stringify({ id: 'theirs', createdAt: Date.now(), lastActivity: Date.now(), started: true }),
+    );
+    await vi.advanceTimersByTimeAsync(150);
+    expect(mine).not.toBe('theirs');
+    expect(s.getSessionId()).toBe('theirs');
+  });
+
+  it('takes a new tab id when another open tab holds the same one', async () => {
+    // A stand-in channel shared by every instance, as tabs share one.
+    const peers: any[] = [];
+    class FakeChannel {
+      onmessage: ((e: { data: unknown }) => void) | null = null;
+      constructor() { peers.push(this); }
+      postMessage(data: unknown) {
+        for (const p of peers) if (p !== this) queueMicrotask(() => p.onmessage?.({ data }));
+      }
+      close() { peers.splice(peers.indexOf(this), 1); }
+    }
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    try {
+      const first = await reload();
+      first.initSessionListeners();
+      const id = first.getTabId();
+      // A duplicated tab starts with a copy of this tab's state.
+      const copy = sessionStorage.getItem('__oodle_tab');
+      vi.resetModules();
+      const second = await import('./session');
+      second._resetSessionModule();
+      if (copy) sessionStorage.setItem('__oodle_tab', copy);
+      second.initSessionListeners();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(first.getTabId()).toBe(id);
+      expect(second.getTabId()).not.toBe(id);
+      first.destroySessionListeners();
+      second.destroySessionListeners();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('replay segment indices', () => {

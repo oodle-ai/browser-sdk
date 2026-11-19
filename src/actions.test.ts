@@ -245,6 +245,30 @@ describe('click actions', () => {
     expect(sent[0].action_loading_time_ms).toBeGreaterThanOrEqual(3000);
   });
 
+  it('does not call a click dead when the page changed on pointer down', async () => {
+    await load();
+    document.body.innerHTML = '<div id="tab">Errors</div>';
+    const tab = document.getElementById('tab')!;
+    tab.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    // A tab control switches its panel on pointer down.
+    document.body.appendChild(document.createElement('section'));
+    await vi.advanceTimersByTimeAsync(0);
+    clickOn('tab');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+  });
+
+  it('counts a click on a label once, not again for its control', async () => {
+    await load();
+    document.body.innerHTML =
+      '<label id="l" for="c">Firefox</label><input id="c" type="checkbox" />';
+    // The browser (and jsdom) sends the control a click of its own
+    // after the label's, in the same task.
+    clickOn('l');
+    await settle();
+    expect(sent).toHaveLength(1);
+  });
+
   it('does not call a click on a link dead', async () => {
     await load();
     document.body.innerHTML = '<a id="l" href="/next"><span id="t">Next</span></a>';

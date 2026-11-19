@@ -30,6 +30,7 @@ export declare function countInAction(data: Record<string, unknown>): void;
  * Without this, the click that left the page, often a link, is lost.
  */
 export declare function sendPendingOnExit(): void;
+export declare function onPointerDown(): void;
 export declare function onClick(e: MouseEvent): void;
 export declare function initActions(emitAction: EmitAction): void;
 export declare function destroyActions(): void;

@@ -165,6 +165,24 @@ describe('sessions across tabs', () => {
     const again = await reload();
     expect(again.getTabId()).toBe(tab);
   });
+
+  it('ends a session another tab replaced at its own expiry', async () => {
+    const s = await reload();
+    s.touchSession();
+    const first = s.getSessionId();
+    const lastActivity = Date.now();
+    // Another tab starts the next session after this one expired.
+    vi.setSystemTime(Date.now() + 30 * MIN);
+    localStorage.setItem(
+      '__oodle_session_v2',
+      JSON.stringify({ id: 'other', createdAt: Date.now(), lastActivity: Date.now(), started: true }),
+    );
+    expect(s.sessionEndedAt(first)).toBe(lastActivity + 15 * MIN);
+    // Nor does this tab adopt it without its own user's activity.
+    expect(s.getSessionId()).toBe('');
+    s.touchSession();
+    expect(s.getSessionId()).toBe('other');
+  });
 });
 
 describe('replay segment indices', () => {

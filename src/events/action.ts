@@ -17,7 +17,7 @@
  * - error: a JS error happened during the action.
  */
 
-import { waitForIdle } from '../core/activity';
+import { waitForIdle, watchActivity } from '../core/activity';
 import { onPageExit } from '../core/transport';
 import { generateId } from '../core/session';
 import { ACTION_MASK_SELECTOR, isActionTextMasked } from '../core/privacy';
@@ -388,9 +388,58 @@ function visibleText(el: HTMLElement, limit = 200): string {
 // When the user last changed a field or scrolled.
 let lastUserInputMs = 0;
 
+// Page activity seen since the last pointer down, and the watch that
+// sees it. Tabs, selects and menus change the page on pointer down, so
+// a click that watched only from its own event saw no change and was
+// called dead.
+let pointerActivity = false;
+let stopPointerWatch: (() => void) | null = null;
+let pointerWatchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function endPointerWatch() {
+  if (stopPointerWatch) stopPointerWatch();
+  stopPointerWatch = null;
+  if (pointerWatchTimer) clearTimeout(pointerWatchTimer);
+  pointerWatchTimer = null;
+}
+
+export function onPointerDown() {
+  endPointerWatch();
+  pointerActivity = false;
+  stopPointerWatch = watchActivity(() => {
+    pointerActivity = true;
+  });
+  // A press held longer than this is not one click.
+  pointerWatchTimer = setTimeout(endPointerWatch, 1000);
+}
+
+// The control of the label just clicked. The browser sends that control
+// a second click of its own, in the same task; it is one user action.
+let labelledControl: Element | null = null;
+
 export function onClick(e: MouseEvent) {
   const target = e.target as HTMLElement | null;
   if (!target || typeof target.tagName !== 'string') return;
+  if (labelledControl && target === labelledControl) {
+    labelledControl = null;
+    return;
+  }
+  const label =
+    typeof target.closest === 'function' ? target.closest('label') : null;
+  if (label) {
+    const control =
+      (label as HTMLLabelElement).control ??
+      (label.htmlFor ? document.getElementById(label.htmlFor) : null);
+    if (control && control !== target) {
+      labelledControl = control;
+      setTimeout(() => {
+        labelledControl = null;
+      }, 0);
+    }
+  }
+  const sawPointerActivity = pointerActivity;
+  pointerActivity = false;
+  endPointerWatch();
   const selector = getSelector(target);
   const chosenName = getChosenActionName(target);
   // A click in a masked part, or with action text masked, reads no text
@@ -430,7 +479,7 @@ export function onClick(e: MouseEvent) {
   inFlight.push(a);
   cancels.push(
     waitForIdle(a.startMs, (r) => {
-      a.hadActivity = r.hadActivity;
+      a.hadActivity = r.hadActivity || sawPointerActivity;
       // A user who scrolls or changes a field after the click got on
       // with the page: typing, or a checkbox that toggled, is a response
       // even when the page shows no other change.
@@ -463,11 +512,16 @@ export function initActions(emitAction: EmitAction) {
     lastUserInputMs = Date.now();
   };
   const removeExit = onPageExit(sendPendingOnExit);
+  document.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
   document.addEventListener('click', handler, { capture: true, passive: true });
   document.addEventListener('input', input, { capture: true, passive: true });
   document.addEventListener('scroll', input, { capture: true, passive: true });
   teardown = () => {
     removeExit();
+    endPointerWatch();
+    document.removeEventListener('pointerdown', onPointerDown, {
+      capture: true,
+    } as EventListenerOptions);
     document.removeEventListener('click', handler, {
       capture: true,
     } as EventListenerOptions);

@@ -432,10 +432,19 @@ let rejectionsActive = false;
  */
 const recordedRejections = new WeakSet<object>();
 
+/**
+ * Errors the app passed to console.error, already recorded as console
+ * errors. zone.js logs an unhandled rejection with console.error and
+ * then calls its rejection handler with the same error, so without this
+ * every such rejection was counted twice.
+ */
+const consoleLoggedErrors = new WeakSet<object>();
+
 function recordRejection(reason: any) {
   if (reason !== null && typeof reason === 'object') {
     if (recordedRejections.has(reason)) return;
     recordedRejections.add(reason);
+    if (consoleLoggedErrors.has(reason)) return;
   }
   emitEvent(() => {
     const raw = reason?.message ?? String(reason);
@@ -596,6 +605,7 @@ function initConsoleTracking() {
         // land in one issue.
         const err =
           level === 'error' ? args.find(isErrorLike) : undefined;
+        if (err && typeof err === 'object') consoleLoggedErrors.add(err);
         emitEvent(() => {
           const d: Record<string, unknown> = {
             event_type: 'console',

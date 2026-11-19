@@ -137,13 +137,37 @@ function loadShared(): SharedSession | null {
   return memShared;
 }
 
+/**
+ * The last record this tab saw of each session, by id. When another tab
+ * replaces a session, the shared record no longer holds it, and a view
+ * of the old session needs the old record to know when it ended.
+ */
+const seenSessions = new Map<string, { lastActivity: number; createdAt: number }>();
+
+function remember(s: SharedSession) {
+  const prev = seenSessions.get(s.id);
+  seenSessions.set(s.id, {
+    lastActivity: Math.max(prev?.lastActivity ?? 0, s.lastActivity),
+    createdAt: s.createdAt,
+  });
+  // Few sessions a tab ever sees; a cap keeps a long-lived tab small.
+  if (seenSessions.size > 20) {
+    const oldest = seenSessions.keys().next().value;
+    if (oldest !== undefined) seenSessions.delete(oldest);
+  }
+}
+
 function cacheShared(s: SharedSession | null): SharedSession | null {
-  if (s) memShared = s;
+  if (s) {
+    memShared = s;
+    remember(s);
+  }
   return s;
 }
 
 function saveShared(s: SharedSession) {
   memShared = s;
+  remember(s);
   sharedReadAt = Date.now();
   writeJSON(local(), SHARED_KEY, s);
 }
@@ -385,6 +409,12 @@ export function getSessionId(): string {
   const now = Date.now();
   const s = loadShared();
   if (!isLive(s, now)) return '';
+  // A tab whose own session another tab replaced stays out of the new
+  // one until its user acts in it (touchSession). Adopting on any event,
+  // a background poll included, started views in tabs nobody was using,
+  // and moved the new session's start to the first of those tabs.
+  const bound = loadTab()?.sessionId;
+  if (bound && bound !== s.id) return '';
   bindTab(s.id);
   return s.id;
 }
@@ -398,11 +428,17 @@ export function getSessionId(): string {
 export function sessionEndedAt(id: string): number | null {
   sharedReadAt = 0;
   const s = loadShared();
-  if (!s || s.id !== id) return null;
+  // A session another tab replaced has ended too: by the record this
+  // tab last saw of it. Without that, a view of a replaced session kept
+  // updating under it until the page went away, which made sessions of
+  // one view that lasted most of an hour.
+  const rec = s && s.id === id ? s : seenSessions.get(id);
+  if (!rec) return s && s.id !== id ? Date.now() : null;
   const end = Math.min(
-    s.lastActivity + SESSION_TIMEOUT_MS,
-    s.createdAt + SESSION_MAX_DURATION_MS,
+    rec.lastActivity + SESSION_TIMEOUT_MS,
+    rec.createdAt + SESSION_MAX_DURATION_MS,
   );
+  if (s && s.id !== id) return Math.min(end, Date.now());
   return Date.now() > end ? end : null;
 }
 
@@ -556,6 +592,7 @@ export function _resetSessionModule() {
   sharedReadAt = 0;
   lastActivityWrite = 0;
   renewListeners.clear();
+  seenSessions.clear();
   if (tabSaveTimer) clearTimeout(tabSaveTimer);
   tabSaveTimer = null;
 }

@@ -215,6 +215,15 @@ not used.
 A tab that becomes visible, or stays visible, keeps its session going
 but never starts a new one: only a user action does.
 
+A tab whose session another tab replaced stays out of the new session
+until its own user acts in it, and its view ends at the old session's
+expiry.
+
+A click counts page changes from its pointer down, so a tab or menu
+that opens on pointer down is not a dead click. A click on a label is
+one action, not a second one for the control it names. An error logged
+with `console.error` and then rejected (as zone.js does) is one error.
+
 Every event has an `event_id`, the `view_id` of the view it happened
 in, and `browser_version` and `os_version`.
 

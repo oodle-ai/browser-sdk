@@ -83,6 +83,24 @@ export function pendingRequestCount(): number {
   return pendingRequests;
 }
 
+/**
+ * Calls `onAny` on every DOM change and request start until the returned
+ * function is called. A click watches the page from its pointer down,
+ * as some controls (tabs, selects) change the page on pointer down,
+ * before the click event fires.
+ */
+export function watchActivity(onAny: () => void): () => void {
+  const listener: Listener = (e) => {
+    if (e.kind !== 'end') onAny();
+  };
+  listeners.add(listener);
+  ensureObserver();
+  return () => {
+    listeners.delete(listener);
+    releaseObserver();
+  };
+}
+
 export interface ActivityResult {
   /** Epoch ms of the last activity, or null when there was none. */
   endMs: number | null;

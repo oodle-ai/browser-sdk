@@ -26,7 +26,8 @@ vi.mock('../core/config', () => ({
   getConfig: () => config,
 }));
 
-vi.mock('../core/session', () => ({
+vi.mock('../core/session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => 'session-1',
   isSessionSampled: () => true,
   incrementSessionCount: () => {},
@@ -160,7 +161,7 @@ describe('view events', () => {
       '/traces?traceId=abc&filters=%5B%5D',
     );
 
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
 
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0].view_url).toBe(origin + '/traces?traceId=abc');
@@ -170,7 +171,7 @@ describe('view events', () => {
   it('keeps no query string when the option is not set', () => {
     window.history.replaceState(null, '', '/traces?traceId=abc');
 
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
 
     expect(enqueued[0].view_url).toBe(origin + '/traces');
   });

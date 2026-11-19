@@ -50,7 +50,8 @@ vi.mock('../core/config', () => ({
   }),
 }));
 
-vi.mock('../core/session', () => ({
+vi.mock('../core/session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => 'session-1',
   nextReplaySegmentIndex: () => 0,
   isReplaySampled: () => true,

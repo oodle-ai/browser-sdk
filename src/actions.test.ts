@@ -1,111 +1,169 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * Click names: element text, masking, and the
- * data-oodle-action-name attribute an app sets to choose one.
+ * Click actions: names, masking, and the action model
+ * (one event when the action ends, frustration types, counts).
  */
 
-const actions: { target: string; text: string }[] = [];
-
-vi.mock('./events/faro', () => ({
-  initEvents: () => {},
-  initVisibilityTracking: () => {},
-  trackPageView: () => {},
-  trackCustomEvent: () => {},
-  destroyEvents: () => {},
-  trackAction: (
-    _type: string,
-    target: string,
-    _selector: string,
-    text: string,
-  ) => {
-    actions.push({ target, text });
-  },
-}));
-
-vi.mock('./core/transport', () => ({
-  flushAll: () => {},
-  initTransportListeners: () => {},
-  destroyTransportListeners: () => {},
-  setReinitCallback: () => {},
-}));
-
-vi.mock('./core/telemetry', () => ({
-  initTelemetry: () => {},
-  destroyTelemetry: () => {},
-}));
-
-vi.mock('./replay/recorder', () => ({
-  initReplay: () => {},
-  stopReplay: () => {},
-}));
-
-const base = {
+const config: Record<string, unknown> = {
   instanceId: 'inst',
   apiKey: 'key',
   endpoint: 'https://localhost',
   service: 'test',
-  sessionReplay: false,
 };
 
-async function start(extra: Record<string, unknown> = {}) {
+vi.mock('./core/config', () => ({ getConfig: () => config }));
+
+type Ev = Record<string, any>;
+let sent: Ev[] = [];
+let action: typeof import('./events/action');
+let privacy: typeof import('./core/privacy');
+
+async function load(extra: Record<string, unknown> = {}) {
   vi.resetModules();
-  const { OodleRum } = await import('./index');
-  OodleRum.init({ ...base, ...extra } as any);
-  return OodleRum;
+  for (const k of Object.keys(config)) {
+    if (!['instanceId', 'apiKey', 'endpoint', 'service'].includes(k)) delete config[k];
+  }
+  Object.assign(config, extra);
+  privacy = await import('./core/privacy');
+  privacy.configurePrivacy(config as any);
+  action = await import('./events/action');
+  action.initActions((d) => sent.push(d));
 }
 
-function click(html: string, id: string) {
-  document.body.innerHTML = html;
+function clickOn(id: string) {
   document
     .getElementById(id)!
     .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-  return actions[actions.length - 1];
 }
 
-describe('click names', () => {
-  let sdk: Awaited<ReturnType<typeof start>>;
+/** Lets the action's idle wait and the rage window run out. */
+async function settle() {
+  await vi.advanceTimersByTimeAsync(11_000);
+}
 
+describe('click actions', () => {
   beforeEach(() => {
-    actions.length = 0;
+    vi.useFakeTimers();
+    sent = [];
   });
 
   afterEach(() => {
-    sdk?.stop();
+    action.destroyActions();
     document.body.innerHTML = '';
+    vi.useRealTimers();
   });
 
   it('use the element text by default', async () => {
-    sdk = await start();
-    expect(click('<span id="s">Delete table salaries</span>', 's')).toEqual({
-      target: 'span[Delete table salaries]',
-      text: 'Delete table salaries',
+    await load();
+    document.body.innerHTML = '<span id="s">Delete table salaries</span>';
+    clickOn('s');
+    await settle();
+    expect(sent[0]).toMatchObject({
+      action_target: 'span[Delete table salaries]',
+      action_text: 'Delete table salaries',
     });
   });
 
   it("send no text with actionText 'mask'", async () => {
-    sdk = await start({ actionText: 'mask' });
-    expect(click('<span id="s">Delete table salaries</span>', 's')).toEqual({
-      target: 'span#s',
-      text: '',
-    });
+    await load({ actionText: 'mask' });
+    document.body.innerHTML = '<span id="s">Delete table salaries</span>';
+    clickOn('s');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_target: 'span#s', action_text: '' });
   });
 
   it('use data-oodle-action-name over the text, even when masked', async () => {
-    sdk = await start({ actionText: 'mask' });
-    expect(
-      click(
-        '<div data-oodle-action-name="Delete table">' +
-          '<span id="s">Delete table salaries</span></div>',
-        's',
-      ),
-    ).toEqual({ target: 'span[Delete table]', text: 'Delete table' });
+    await load({ actionText: 'mask' });
+    document.body.innerHTML =
+      '<div data-oodle-action-name="Delete table">' +
+      '<span id="s">Delete table salaries</span></div>';
+    clickOn('s');
+    await settle();
+    expect(sent[0]).toMatchObject({
+      action_target: 'span[Delete table]',
+      action_text: 'Delete table',
+    });
   });
 
   it('ignore an empty data-oodle-action-name', async () => {
-    sdk = await start();
-    expect(
-      click('<span id="s" data-oodle-action-name="  ">Open</span>', 's'),
-    ).toEqual({ target: 'span[Open]', text: 'Open' });
+    await load();
+    document.body.innerHTML = '<span id="s" data-oodle-action-name="  ">Open</span>';
+    clickOn('s');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_target: 'span[Open]' });
+  });
+
+  it('is sent once, when the page goes idle, with its loading time', async () => {
+    await load();
+    document.body.innerHTML = '<button id="b">Save</button><div id="out"></div>';
+    clickOn('b');
+    expect(sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(50);
+    document.getElementById('out')!.textContent = 'saved';
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      event_type: 'action',
+      action_type: 'click',
+      is_frustration: 0,
+    });
+    expect(sent[0].action_loading_time_ms).toBeGreaterThanOrEqual(50);
+    expect(typeof sent[0].action_id).toBe('string');
+  });
+
+  it('marks a click after which nothing happened as dead', async () => {
+    await load();
+    document.body.innerHTML = '<button id="b">Save</button>';
+    clickOn('b');
+    await settle();
+    expect(sent[0]).toMatchObject({
+      action_type: 'dead_click',
+      action_frustration_types: 'dead_click',
+      is_frustration: 1,
+    });
+  });
+
+  it('does not call a click into a form field dead', async () => {
+    await load();
+    document.body.innerHTML = '<input id="i" />';
+    clickOn('i');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'click', is_frustration: 0 });
+  });
+
+  it('sends a burst of clicks on one element as one rage click', async () => {
+    await load();
+    document.body.innerHTML = '<button id="b">Pay</button>';
+    clickOn('b');
+    clickOn('b');
+    clickOn('b');
+    clickOn('b');
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      action_type: 'rage_click',
+      action_click_count: 4,
+      is_frustration: 1,
+    });
+    expect(sent[0].action_frustration_types).toContain('rage_click');
+  });
+
+  it('counts errors during the action and calls it an error click', async () => {
+    await load();
+    document.body.innerHTML = '<button id="b">Go</button>';
+    clickOn('b');
+    const id = action.currentActionId();
+    expect(id).not.toBe('');
+    action.countInAction({ event_type: 'error' });
+    document.body.appendChild(document.createElement('p'));
+    await settle();
+    expect(sent[0]).toMatchObject({
+      action_id: id,
+      action_type: 'error_click',
+      action_error_count: 1,
+      is_frustration: 1,
+    });
+    expect(action.currentActionId()).toBe('');
   });
 });

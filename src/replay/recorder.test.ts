@@ -84,7 +84,8 @@ let sessionId = 'session-1';
 
 let replaySampled = true;
 
-vi.mock('../core/session', () => ({
+vi.mock('../core/session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => sessionId,
   nextReplaySegmentIndex: () => sessionSeq++,
   isReplaySampled: () => replaySampled,

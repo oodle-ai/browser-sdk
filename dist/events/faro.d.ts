@@ -62,7 +62,26 @@ export declare function captureZoneRejections(): void;
  * retrying path.
  */
 export declare function initVisibilityTracking(): void;
-export declare function trackPageView(): void;
-export declare function trackAction(type: string, target: string, selector: string, text: string, isFrustration: boolean, clickX?: number, clickY?: number): void;
+/**
+ * The resource types. The browser's initiatorType says
+ * which element asked (`link`, `img`, `script`), not what came
+ * back, so the file extension decides when it is clearer.
+ */
+export declare function resourceType(initiator: string, url: string): string;
+/**
+ * The phases of a resource's waterfall. Zero when
+ * the server sends no Timing-Allow-Origin header: the browser
+ * then hides the phases of a cross-origin request.
+ */
+export declare function resourceTimingFields(r: PerformanceResourceTiming): Record<string, number>;
 export declare function trackCustomEvent(name: string, properties?: Record<string, unknown>): void;
+export declare function getDeviceType(ua: string): string;
+export declare function getBrowserName(ua: string): string;
+export declare function getBrowserVersion(ua: string): string;
+/**
+ * Checked before the desktop systems: an iPhone says "like Mac
+ * OS X" and Android says "Linux".
+ */
+export declare function getOSName(ua: string): string;
+export declare function getOSVersion(ua: string): string;
 export declare function destroyEvents(): void;

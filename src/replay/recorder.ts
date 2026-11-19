@@ -7,6 +7,8 @@ import {
 } from '../core/privacy';
 import {
   getSessionId,
+  getTabId,
+  isLegacyReplayTab,
   isReplaySampled,
   nextReplaySegmentIndex,
 } from '../core/session';
@@ -158,6 +160,7 @@ let startInFlight: Promise<void> | null = null;
 let buffer: eventWithTime[] = [];
 let bufferBytes = 0;
 let bufferSessionId = '';
+let bufferTabId = '';
 let replayHasFlushed = false;
 
 /**
@@ -455,6 +458,7 @@ function openBuffer(): boolean {
 
   bufferSessionId = getSessionId();
   bufferSegmentIndex = nextReplaySegmentIndex();
+  bufferTabId = isLegacyReplayTab() ? '' : getTabId();
   const rotated =
     lastSegmentSessionId !== '' &&
     lastSegmentSessionId !== bufferSessionId;
@@ -479,6 +483,7 @@ function flushReplayBuffer() {
   openBuffer();
   const sessionId = bufferSessionId;
   const index = bufferSegmentIndex;
+  const tabId = bufferTabId;
   const batch = buffer.splice(0);
   const batchBytes = bufferBytes;
   bufferBytes = 0;
@@ -489,6 +494,10 @@ function flushReplayBuffer() {
     REPLAY_BATCH_KEY,
     {
       session_id: sessionId,
+      // Segments are keyed by tab: tabs share a session. A tab
+      // that adopted a session from an older SDK sends none, so
+      // its segments stay where the old ones are.
+      ...(tabId ? { tab_id: tabId } : {}),
       segment_index: index,
       events: batch,
     } as any,
@@ -547,6 +556,11 @@ function scheduleFlush() {
 }
 
 function addToBuffer(event: eventWithTime) {
+  // The session expired and no user activity started the next
+  // one: nothing is recorded, as for every other event. The
+  // first event after renewal opens a new segment, and the
+  // rotation check below asks rrweb for a snapshot.
+  if (!bufferSessionId && !getSessionId()) return;
   if (openBuffer() && event.type !== FULL_SNAPSHOT) {
     // The session rotated (30 min idle or the 4 hour
     // cap) while the recorder kept running. rrweb knows

@@ -24,7 +24,8 @@ vi.mock('../core/config', () => ({
   getConfig: () => config,
 }));
 
-vi.mock('../core/session', () => ({
+vi.mock('../core/session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => 'session-1',
   isSessionSampled: () => true,
   incrementSessionCount: () => {},
@@ -108,7 +109,7 @@ describe('privacy options on events', () => {
       '',
       '/projects/acme/tables/salaries?token=1',
     );
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[0].view_url).toBe(
       origin + '/projects/:project/tables/:table',
     );
@@ -119,28 +120,28 @@ describe('privacy options on events', () => {
 
   it('keeps view_url_path unchanged when nothing is set', () => {
     window.history.replaceState(null, '', '/projects/acme');
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[0].view_url_path).toBe('/projects/acme');
   });
 
   it('sends user_agent empty with userAgent none', () => {
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[0].user_agent).toBe(navigator.userAgent);
     privacy.configurePrivacy({ userAgent: 'none' });
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[1].user_agent).toBe('');
     expect(enqueued[1].browser_name).toBeTruthy();
   });
 
   it('sends only the user id with userInfo id', () => {
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[0]).toMatchObject({
       user_id: 'u1',
       user_name: 'Jane Doe',
       user_email: 'jane@acme.io',
     });
     privacy.configurePrivacy({ userInfo: 'id' });
-    faro.trackPageView();
+    faro.trackCustomEvent('page');
     expect(enqueued[1]).toMatchObject({
       user_id: 'u1',
       user_name: '',
@@ -155,37 +156,37 @@ describe('privacy options on events', () => {
       e.session_id = 'forged';
     };
     try {
-      faro.trackPageView();
+      faro.trackCustomEvent('page');
     } finally {
       delete config.beforeSend;
     }
     expect(enqueued[0].view_url_path).toBe('/redacted');
     // The event's identity cannot be changed.
     expect(enqueued[0].session_id).toBe('session-1');
-    expect(enqueued[0].event_type).toBe('view');
+    expect(enqueued[0].event_type).toBe('custom');
   });
 
   it('lets beforeSend replace or drop an event', () => {
     config.beforeSend = (e: any) =>
-      e.event_type === 'custom' ? null : { ...e, extra: 1 };
+      e.custom_event_name === 'x' ? null : { ...e, extra: 1 };
     try {
       faro.trackCustomEvent('x');
-      faro.trackPageView();
+      faro.trackCustomEvent('page');
     } finally {
       delete config.beforeSend;
     }
     expect(enqueued).toHaveLength(1);
-    expect(enqueued[0]).toMatchObject({ event_type: 'view', extra: 1 });
+    expect(enqueued[0]).toMatchObject({ event_type: 'custom', extra: 1 });
   });
 
   it('accepts a frozen event returned by beforeSend', () => {
     config.beforeSend = (e: any) => Object.freeze({ ...e, view_url_path: '/x' });
     try {
-      expect(() => faro.trackPageView()).not.toThrow();
+      expect(() => faro.trackCustomEvent('page')).not.toThrow();
     } finally {
       delete config.beforeSend;
     }
-    expect(enqueued[0]).toMatchObject({ view_url_path: '/x', event_type: 'view' });
+    expect(enqueued[0]).toMatchObject({ view_url_path: '/x', event_type: 'custom' });
   });
 
   it('drops events from an async beforeSend, and warns once', () => {
@@ -193,8 +194,8 @@ describe('privacy options on events', () => {
     console.warn = warn;
     config.beforeSend = async (e: any) => e;
     try {
-      faro.trackPageView();
-      faro.trackPageView();
+      faro.trackCustomEvent('page');
+      faro.trackCustomEvent('page');
     } finally {
       delete config.beforeSend;
     }
@@ -210,8 +211,8 @@ describe('privacy options on events', () => {
     };
     try {
       faro.initEvents();
-      faro.trackPageView();
-      faro.trackPageView();
+      faro.trackCustomEvent('page');
+      faro.trackCustomEvent('page');
     } finally {
       delete config.beforeSend;
     }

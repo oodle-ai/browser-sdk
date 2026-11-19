@@ -95,6 +95,19 @@ describe('session lifetime', () => {
     expect(s.getSessionId()).toBe('');
   });
 
+  it('is extended, never started, by the tab becoming visible', async () => {
+    const s = await reload();
+    s.touchSession();
+    const id = s.getSessionId();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    s.extendSession();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    expect(s.getSessionId()).toBe(id);
+    vi.setSystemTime(Date.now() + 16 * MIN);
+    s.extendSession();
+    expect(s.getSessionId()).toBe('');
+  });
+
   it('starts the next session on the next user activity and tells listeners', async () => {
     const s = await reload();
     s.touchSession();

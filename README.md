@@ -188,15 +188,21 @@ its loading time and the errors, resources and long tasks that
 happened during it. Events during an action carry its `action_id`.
 `action_frustration_types` lists `rage_click` (three or more clicks on
 one element within a second, sent as one action), `dead_click` (the
-page did nothing; not counted for form fields, links, canvas, editable
-text, text selection, or when the user scrolls or types after the
-click) and `error_click` (a JavaScript error happened during the
-action).
+page did nothing; not counted for text fields, selects, links, canvas,
+editable text, text selection, or when the user scrolls or types after
+the click; a checkbox or button that changes nothing is dead) and
+`error_click` (a JavaScript error happened during the action). Clicks
+with scrolling or a text selection are never a rage click, and a rage
+click is also dead when any of its clicks got no response.
 
-An action is named after what the user clicked: a click inside a
-button or link is named after the button or link, and a click on any
-other element by the first line of its visible text, cut at 80
-characters.
+An action is named after what the user clicked. The clicked element
+and up to 10 parents are checked for a name they give themselves (a
+form label, a button's or link's text, `aria-label`,
+`aria-labelledby`, `alt`, `title`, `placeholder`), and failing that for
+visible text. The first line is used, cut at 80 characters.
+
+A tab that becomes visible, or stays visible, keeps its session going
+but never starts a new one: only a user action does.
 
 Every event has an `event_id`, the `view_id` of the view it happened
 in, and `browser_version` and `os_version`.

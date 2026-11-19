@@ -124,6 +124,33 @@ describe('click actions', () => {
     });
   });
 
+  it('calls a checkbox that changed nothing dead', async () => {
+    await load();
+    document.body.innerHTML = '<input id="c" type="checkbox" />';
+    clickOn('c');
+    await settle();
+    expect(sent[0]).toMatchObject({ action_type: 'dead_click', is_frustration: 1 });
+  });
+
+  it('does not call clicks with scrolling a rage', async () => {
+    await load();
+    document.body.innerHTML = '<div id="d">Report</div>';
+    clickOn('d');
+    document.dispatchEvent(new Event('scroll'));
+    clickOn('d');
+    clickOn('d');
+    await settle();
+    expect(sent.some((e) => e.action_type === 'rage_click')).toBe(false);
+  });
+
+  it('names an icon after its labelled parent', async () => {
+    await load();
+    document.body.innerHTML = '<div aria-label="Close panel"><svg><path id="p"></path></svg></div>';
+    clickOn('p');
+    await settle();
+    expect(sent[0].action_target).toBe('div[Close panel]');
+  });
+
   it('does not call a click on a link dead', async () => {
     await load();
     document.body.innerHTML = '<a id="l" href="/next"><span id="t">Next</span></a>';

@@ -45,6 +45,8 @@ interface ClickAction {
   hadActivity: boolean;
   /** The user typed or scrolled while the click was watched. */
   userInput: boolean;
+  /** Text was selected when the click came: part of a selection. */
+  selected: boolean;
   done: boolean;
 }
 
@@ -89,17 +91,22 @@ export function countInAction(data: Record<string, unknown>) {
   }
 }
 
-function frustrations(a: ClickAction, rage: boolean): string[] {
+function isDead(a: ClickAction): boolean {
+  return a.deadCandidate && !a.selected && !a.hadActivity && !a.userInput;
+}
+
+function frustrations(a: ClickAction, rage: boolean, anyDead = false): string[] {
   const f: string[] = [];
   if (rage) f.push('rage_click');
-  if (a.deadCandidate && !a.hadActivity && !a.userInput) f.push('dead_click');
+  // A burst is also dead when any of its clicks got no response.
+  if (rage ? anyDead : isDead(a)) f.push('dead_click');
   if (a.errorCount > 0) f.push('error_click');
   return f;
 }
 
-function send(a: ClickAction, rage: boolean, count = 1) {
+function send(a: ClickAction, rage: boolean, count = 1, anyDead = false) {
   if (!emit) return;
-  const f = frustrations(a, rage);
+  const f = frustrations(a, rage, anyDead);
   const type = rage
     ? 'rage_click'
     : f.includes('dead_click')
@@ -140,17 +147,21 @@ function closeChain() {
   if (c.timer) clearTimeout(c.timer);
   const finished = () => c.clicks.every((a) => a.done);
   const flush = () => {
-    if (c.clicks.length >= RAGE_CLICKS) {
+    // Clicks that come with scrolling or a text selection are a user
+    // reading or selecting (a double or triple click), not raging.
+    const reading = c.clicks.some((a) => a.userInput || a.selected);
+    if (c.clicks.length >= RAGE_CLICKS && !reading) {
       // One action for the burst. Counts
       // are summed; the time is the first click's.
       const first = c.clicks[0];
+      const anyDead = c.clicks.some(isDead);
       for (const a of c.clicks.slice(1)) {
         first.errorCount += a.errorCount;
         first.resourceCount += a.resourceCount;
         first.longTaskCount += a.longTaskCount;
         first.hadActivity = first.hadActivity || a.hadActivity;
       }
-      send(first, true, c.clicks.length);
+      send(first, true, c.clicks.length, anyDead);
     } else {
       for (const a of c.clicks) send(a, false);
     }
@@ -172,13 +183,14 @@ function closeChain() {
   cancels.push(() => clearInterval(poll));
 }
 
-function isFormField(el: HTMLElement): boolean {
-  const tag = el.tagName?.toLowerCase() ?? '';
-  if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'label') {
-    return true;
+/** A click on a label is a click on the control it names. */
+function forControl(el: HTMLElement): HTMLElement {
+  if (el.tagName === 'LABEL') {
+    const id = el.getAttribute('for');
+    const control = id ? document.getElementById(id) : null;
+    if (control) return control;
   }
-  if (el.isContentEditable) return true;
-  return typeof el.closest === 'function' && el.closest('label') !== null;
+  return el;
 }
 
 function hasSelection(): boolean {
@@ -191,19 +203,81 @@ function hasSelection(): boolean {
 }
 
 /**
- * Elements a click on any of whose children is a click on them: a click
- * on the icon or the label inside a button is a click on the button, and
- * is named after it.
- */
-const CONTROL_SELECTOR =
-  'button,a[href],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="option"],summary,label';
-
-/**
  * Clicks on these are not dead when the page shows no change: a link
  * may navigate away, a canvas draws without DOM changes, and editable
  * text takes the caret.
  */
-const NOT_DEAD_SELECTOR = 'a[href],canvas,[contenteditable],[contenteditable] *';
+const NOT_DEAD_SELECTOR =
+  // Text fields take the caret without changing the page; checkboxes,
+  // radios and buttons must change something, so they stay candidates.
+  'input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="range"]),' +
+  'textarea,select,[contenteditable],[contenteditable] *,canvas,a[href],a[href] *';
+
+/** How many parents a click's name may come from. */
+const MAX_NAME_PARENTS = 10;
+
+/** The first line of `t`, cut at 80 characters. */
+function firstLine(t: string): string {
+  const line = t.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return line.length > 80 ? line.slice(0, 79) + '…' : line;
+}
+
+function attr(el: HTMLElement, name: string): string {
+  return (el.getAttribute(name) ?? '').trim();
+}
+
+/** A name the element gives itself, in the order a reader would use. */
+function ownName(el: HTMLElement): string {
+  const labels = (el as HTMLInputElement).labels;
+  if (labels && labels.length > 0) return firstLine(visibleText(labels[0] as HTMLElement));
+  if (el.tagName === 'INPUT') {
+    const type = attr(el, 'type');
+    if (type === 'button' || type === 'submit' || type === 'reset') {
+      return firstLine((el as HTMLInputElement).value ?? '');
+    }
+  }
+  const role = attr(el, 'role');
+  if (['BUTTON', 'LABEL', 'A'].includes(el.tagName) || role === 'button' || role === 'link') {
+    const t = firstLine(visibleText(el));
+    if (t) return t;
+  }
+  const aria = attr(el, 'aria-label');
+  if (aria) return firstLine(aria);
+  const labelledBy = attr(el, 'aria-labelledby');
+  if (labelledBy) {
+    const t = labelledBy
+      .split(/\s+/)
+      .map((id) => document.getElementById(id))
+      .filter((x): x is HTMLElement => !!x)
+      .map((x) => visibleText(x))
+      .join(' ');
+    if (t.trim()) return firstLine(t);
+  }
+  for (const a of ['alt', 'title', 'placeholder']) {
+    const v = attr(el, a);
+    if (v) return firstLine(v);
+  }
+  return '';
+}
+
+/**
+ * The name of a click: the first name that the clicked element or one
+ * of its parents gives itself (a label, a button's text, aria-label,
+ * alt, title), and failing that the first visible text found going up.
+ * An icon in a toolbar is named after its labelled parent, not after
+ * its CSS classes.
+ */
+function findActionName(target: HTMLElement): { el: HTMLElement; name: string } | null {
+  for (const pass of [ownName, (el: HTMLElement) => firstLine(visibleText(el))]) {
+    let el: HTMLElement | null = target;
+    for (let i = 0; el && i <= MAX_NAME_PARENTS && el.tagName !== 'BODY' && el.tagName !== 'HTML'; i++) {
+      const name = pass(el);
+      if (name) return { el, name };
+      el = el.parentElement;
+    }
+  }
+  return null;
+}
 
 /** The text a user reads on an element, with its line breaks. */
 function visibleText(el: HTMLElement): string {
@@ -218,21 +292,20 @@ export function onClick(e: MouseEvent) {
   const target = e.target as HTMLElement | null;
   if (!target || typeof target.tagName !== 'string') return;
   const selector = getSelector(target);
-  let control: HTMLElement | null = null;
-  try {
-    control = typeof target.closest === 'function' ? target.closest<HTMLElement>(CONTROL_SELECTOR) : null;
-  } catch {
-    control = null;
-  }
-  const named = control ?? target;
-  const tagName = named.tagName.toLowerCase();
   const chosenName = getChosenActionName(target);
+  const found = chosenName === null ? findActionName(target) : null;
+  const named = found?.el ?? target;
+  const tagName = named.tagName.toLowerCase();
   const masked = chosenName === null && isActionTextMasked(named);
   const text = chosenName ?? (masked ? '' : visibleText(named).slice(0, 200));
   const targetName =
     chosenName !== null
       ? `${tagName}[${chosenName}]`
-      : getTargetName(named, tagName, text, masked);
+      : masked
+        ? getIdOrClassName(named, tagName)
+        : found
+          ? `${tagName}[${found.name}]`
+          : getIdOrClassName(target, target.tagName.toLowerCase());
 
   const a: ClickAction = {
     id: generateId(),
@@ -244,7 +317,8 @@ export function onClick(e: MouseEvent) {
     text,
     x: e.clientX,
     y: e.clientY,
-    deadCandidate: !isFormField(target) && !hasSelection() && !matchesSafe(target, NOT_DEAD_SELECTOR),
+    deadCandidate: !matchesSafe(forControl(target), NOT_DEAD_SELECTOR),
+    selected: hasSelection(),
     errorCount: 0,
     resourceCount: 0,
     longTaskCount: 0,
@@ -319,29 +393,6 @@ function getChosenActionName(el: HTMLElement): string | null {
   } catch {
     return null;
   }
-}
-
-function getTargetName(
-  el: HTMLElement,
-  tagName: string,
-  text: string,
-  masked = false,
-): string {
-  // aria-label and title are text a user reads, and often
-  // hold the same data as the element's content.
-  if (masked) return getIdOrClassName(el, tagName);
-  const ariaLabel = el.getAttribute('aria-label');
-  if (ariaLabel) return `${tagName}[${ariaLabel}]`;
-  const title = el.getAttribute('title');
-  if (title) return `${tagName}[${title}]`;
-  // The first line a user reads: a card is named by its heading, a
-  // table body by its first row. A long line is cut, not dropped, so a
-  // container is not named by its CSS classes.
-  const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  if (firstLine) {
-    return `${tagName}[${firstLine.length > 80 ? firstLine.slice(0, 79) + '…' : firstLine}]`;
-  }
-  return getIdOrClassName(el, tagName);
 }
 
 function matchesSafe(el: HTMLElement, selector: string): boolean {

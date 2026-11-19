@@ -330,6 +330,28 @@ let lastActivityWrite = 0;
  * Records user activity. Starts a session when none is live:
  * a page load and a user action are what may start one.
  */
+/**
+ * Extends the live session without starting a new one. A tab that only
+ * became or stayed visible keeps its session going, but it is no user
+ * action, so it must not start the next session: switching back to an
+ * idle tab would otherwise count as a new visit.
+ */
+export function extendSession() {
+  const now = Date.now();
+  sharedReadAt = 0;
+  const s = loadShared();
+  if (!isLive(s, now)) return;
+  if (now - lastActivityWrite >= ACTIVITY_WRITE_MS) {
+    s.lastActivity = Math.max(s.lastActivity, now);
+    saveShared(s);
+    lastActivityWrite = now;
+  }
+  bindTab(s.id);
+}
+
+/** How often a visible tab extends its session while it stays visible. */
+export const VISIBLE_EXTEND_MS = 60_000;
+
 export function touchSession() {
   const now = Date.now();
   let s = loadShared();
@@ -436,6 +458,7 @@ export function isReplaySampled(): boolean {
 
 let activityHandler: (() => void) | null = null;
 let visHandler: (() => void) | null = null;
+let visibleTimer: ReturnType<typeof setInterval> | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ['click', 'keydown', 'touchstart', 'scroll'];
 
@@ -463,12 +486,17 @@ export function initSessionListeners() {
   window.addEventListener('storage', storageHandler);
   visHandler = () => {
     if (document.visibilityState === 'visible') {
-      touchSession();
+      extendSession();
     } else if (memTab) {
       saveTabNow(memTab);
     }
   };
   document.addEventListener('visibilitychange', visHandler);
+  // A tab on screen is in use even when the user only reads it, so it
+  // keeps the session going while it stays visible.
+  visibleTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') extendSession();
+  }, VISIBLE_EXTEND_MS);
 }
 
 export function destroySessionListeners() {
@@ -484,6 +512,10 @@ export function destroySessionListeners() {
   if (visHandler) {
     document.removeEventListener('visibilitychange', visHandler);
     visHandler = null;
+  }
+  if (visibleTimer) {
+    clearInterval(visibleTimer);
+    visibleTimer = null;
   }
   if (storageHandler) {
     window.removeEventListener('storage', storageHandler);

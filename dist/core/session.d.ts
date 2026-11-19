@@ -37,6 +37,15 @@ export declare function onSessionRenewed(cb: RenewListener): () => void;
  * Records user activity. Starts a session when none is live:
  * a page load and a user action are what may start one.
  */
+/**
+ * Extends the live session without starting a new one. A tab that only
+ * became or stayed visible keeps its session going, but it is no user
+ * action, so it must not start the next session: switching back to an
+ * idle tab would otherwise count as a new visit.
+ */
+export declare function extendSession(): void;
+/** How often a visible tab extends its session while it stays visible. */
+export declare const VISIBLE_EXTEND_MS = 60000;
 export declare function touchSession(): void;
 /**
  * The live session id, or '' when the session expired and no

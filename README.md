@@ -140,12 +140,54 @@ them while tracing is on.
 ## What's collected
 
 - **Web Vitals** — LCP, FID, CLS, INP, TTFB, FCP
-- **Page views** and navigation timing
+- **Views** — one per page load or change of path, with navigation timing
 - **JavaScript errors** and unhandled rejections
-- **Network requests** — fetch and XHR with timing
-- **User actions** — clicks, rage clicks, dead clicks
+- **Network requests** — fetch and XHR with timing, and resource timing phases
+- **User actions** — clicks, with rage, dead and error clicks
 - **Console errors and warnings**
 - **Session Replay** — pixel-perfect DOM recordings
+
+### Sessions
+
+A session is shared by all tabs of your site. It ends after 15
+minutes without user activity (clicks, key presses, scrolling,
+touches, or the tab becoming visible), or 4 hours after it started.
+Background work such as polling does not keep a session open or start
+a new one: the next session starts with the next page load or user
+activity. Each tab sends a `tab_id`, and its replay is recorded on its
+own.
+
+The first event of a session has `session_is_new: 1`.
+
+### Views
+
+A view is a page load (`view_loading_type: 'initial_load'`) or a
+change of path in a single page app (`'route_change'`). A query string
+or `#anchor` change does not start a view; a hash route (`#/settings`)
+does. Each view has a `view_id`. Its state is sent when it starts, at
+most every 3 seconds while its numbers change, when the tab is hidden,
+and when it ends (`view_is_active: 0`). Every send has a higher
+`view_update_seq`; keep the highest one per `view_id`. The first send
+has `view_is_new: 1`.
+
+A view reports its loading time (until the page has no pending request
+and no DOM change for 100 ms), time spent, and how many actions,
+errors, resources, long tasks and frustrations happened in it. LCP,
+FCP, TTFB and FID are page load vitals and are on the `initial_load`
+view only. CLS and INP are measured for each view.
+
+### Actions
+
+A click is sent when the page stops doing work because of it, with
+its loading time and the errors, resources and long tasks that
+happened during it. Events during an action carry its `action_id`.
+`action_frustration_types` lists `rage_click` (three or more clicks on
+one element within a second, sent as one action), `dead_click` (the
+page did nothing; not counted for form fields or text selection) and
+`error_click` (a JavaScript error happened during the action).
+
+Every event has an `event_id`, the `view_id` of the view it happened
+in, and `browser_version` and `os_version`.
 
 ## Privacy
 

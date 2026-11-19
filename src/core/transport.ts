@@ -604,10 +604,17 @@ export function enqueue(
   scheduleGlobalDebounce();
 }
 
+/**
+ * Queues `item`, replacing a queued item with the same key.
+ * `merge` sees the item being replaced and the new one, so a
+ * flag only the first of them carries (a view's first update)
+ * is not lost when a later one replaces it.
+ */
 export function upsert(
   batchKey: string,
   key: string,
   item: Payload,
+  merge?: (prev: Payload, next: Payload) => Payload,
 ) {
   const { bytes, oversized } = measure(
     batchKey,
@@ -626,7 +633,9 @@ export function upsert(
       batchKey,
       q.items[existingIdx],
     ).bytes;
-    q.items[existingIdx] = item;
+    q.items[existingIdx] = merge
+      ? merge(q.items[existingIdx], item)
+      : item;
     q.bytesEstimate += bytes - oldBytes;
   } else {
     const idx = q.items.length;

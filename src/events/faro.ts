@@ -1,11 +1,3 @@
-import {
-  onLCP,
-  onFID,
-  onINP,
-  onCLS,
-  onFCP,
-  onTTFB,
-} from 'web-vitals';
 import { getConfig } from '../core/config';
 import type {
   NetworkBodiesConfig,
@@ -15,10 +7,27 @@ import type {
 } from '../core/config';
 import {
   getSessionId,
+  getTabId,
+  claimSessionStart,
+  generateId,
   incrementSessionCount,
   getSessionCounts,
   isSessionSampled,
 } from '../core/session';
+import { requestStarted, requestEnded } from '../core/activity';
+import {
+  initViews,
+  destroyViews,
+  countInView,
+  currentViewId,
+  ensureView,
+} from './view';
+import {
+  initActions,
+  destroyActions,
+  countInAction,
+  currentActionId,
+} from './action';
 import {
   getUserId,
   getUserName,
@@ -65,7 +74,9 @@ let teardownFns: Array<() => void> = [];
 let cachedContext: {
   device_type: string;
   browser_name: string;
+  browser_version: string;
   os_name: string;
+  os_version: string;
   user_agent: string;
   language: string;
 } | null = null;
@@ -136,23 +147,36 @@ export function viewUrl(
 
 function ensureCachedContext() {
   if (!cachedContext) {
+    const ua = navigator.userAgent;
     cachedContext = {
-      device_type: getDeviceType(),
-      browser_name: getBrowserName(),
-      os_name: getOSName(),
-      user_agent: navigator.userAgent,
+      device_type: getDeviceType(ua),
+      browser_name: getBrowserName(ua),
+      browser_version: getBrowserVersion(ua),
+      os_name: getOSName(ua),
+      os_version: getOSVersion(ua),
+      user_agent: ua,
       language: navigator.language,
     };
   }
 }
 
-function baseContext(): Record<string, unknown> {
+function connectionType(): string {
+  const c = (navigator as any).connection;
+  return typeof c?.effectiveType === 'string' ? c.effectiveType : '';
+}
+
+function baseContext(sessionId?: string): Record<string, unknown> {
   ensureCachedContext();
   const counts = getSessionCounts();
   const flags = getFeatureFlags();
   const config = getConfig();
+  const sid = sessionId ?? getSessionId();
   const ctx: Record<string, unknown> = {
-    session_id: getSessionId(),
+    event_id: generateId(),
+    session_id: sid,
+    tab_id: getTabId(),
+    view_id: currentViewId(),
+    action_id: currentActionId(),
     ...userFields(
       getUserId(),
       getUserName(),
@@ -172,7 +196,9 @@ function baseContext(): Record<string, unknown> {
     referrer_url: sanitizeReferrer(document.referrer),
     device_type: cachedContext!.device_type,
     browser_name: cachedContext!.browser_name,
+    browser_version: cachedContext!.browser_version,
     os_name: cachedContext!.os_name,
+    os_version: cachedContext!.os_version,
     user_agent: sendUserAgent()
       ? cachedContext!.user_agent
       : '',
@@ -181,9 +207,7 @@ function baseContext(): Record<string, unknown> {
     session_error_count: counts.errorCount,
     session_action_count: counts.actionCount,
     replay_id:
-      isReplayActive() && hasReplayFlushed()
-        ? getSessionId()
-        : '',
+      isReplayActive() && hasReplayFlushed() ? sid : '',
   };
   if (Object.keys(flags).length > 0) {
     ctx.feature_flags = flags;
@@ -242,11 +266,26 @@ function applyBeforeSend(
   }
 }
 
+/**
+ * Marks the first event of a session. Readers count sessions
+ * from this flag; it does not depend on which kind of event
+ * comes first, or on a view being sent at all.
+ */
+function markSessionStart(event: Record<string, unknown>) {
+  if (claimSessionStart()) event.session_is_new = 1;
+}
+
 function emitEvent(
   buildData: () => Record<string, unknown>,
 ) {
+  // An expired session records nothing until user activity
+  // starts the next one (see core/session).
+  if (!getSessionId()) return;
   if (!isSessionSampled()) return;
   if (isServerRateLimited('events')) return;
+  // The page loaded while the session was expired; the user
+  // acted since, so the view starts now.
+  ensureView();
   const data = buildData();
   const eventType =
     data.event_type as string;
@@ -257,7 +296,11 @@ function emitEvent(
   // include it. An event beforeSend drops still happened, so
   // it still counts.
   incrementSessionCount(eventType);
-  const event = applyBeforeSend({ ...baseContext(), ...data });
+  countInView(data);
+  countInAction(data);
+  const built = { ...baseContext(), ...data };
+  markSessionStart(built);
+  const event = applyBeforeSend(built);
   if (!event) return;
   enqueue(EVENTS_BATCH_KEY, event);
 }
@@ -270,41 +313,68 @@ function emitEventDeferred(
   );
 }
 
-function emitViewEvent(
-  buildData: () => Record<string, unknown>,
+/**
+ * Sends one update of a view. Each update is its own event:
+ * readers keep the highest `view_update_seq` per view, and the
+ * first update is what counts the view. Collapsing updates in
+ * the batch would drop that first one.
+ */
+function emitViewUpdate(
+  data: Record<string, unknown>,
+  sessionId: string,
 ) {
   if (!isSessionSampled()) return;
   if (isServerRateLimited('events')) return;
-  const data = buildData();
-  const eventType =
-    data.event_type as string;
-  incrementSessionCount(eventType);
-  const ctx = baseContext();
-  const event = applyBeforeSend({ ...ctx, ...data });
+  if (data.view_update_seq === 1) {
+    incrementSessionCount('view');
+  }
+  // The view's own session, not the live one: the last
+  // update of a view can be sent after the session renewed.
+  const built: Record<string, unknown> = {
+    ...baseContext(sessionId),
+    ...data,
+    action_id: '',
+    connection_type: connectionType(),
+    screen_width: typeof screen !== 'undefined' ? screen.width : 0,
+    screen_height: typeof screen !== 'undefined' ? screen.height : 0,
+  };
+  if (data.view_update_seq === 1) built.view_is_new = 1;
+  if (sessionId === getSessionId()) markSessionStart(built);
+  const event = applyBeforeSend(built);
   if (!event) return;
-  // One row per page load, so the key is the path and not
-  // view_url. Each update replaces the whole row, so view_url is
-  // the URL at the last metric: a record the user opened after the
-  // page loaded can show in it. Route changes are separate view
-  // events (trackPageView), so they record each opened record.
-  const viewId =
-    (ctx.session_id as string) +
-    ':' +
-    ctx.view_url_path;
-  upsert(EVENTS_BATCH_KEY, viewId, event);
+  // One row per view per batch: updates queued since the last
+  // send collapse into the latest. The flags that count the
+  // view and the session move onto it.
+  upsert(
+    EVENTS_BATCH_KEY,
+    'view:' + String(data.view_id),
+    event,
+    (prev, next) => {
+      const merged = { ...next } as Record<string, unknown>;
+      const p = prev as Record<string, unknown>;
+      if (p.view_is_new === 1) merged.view_is_new = 1;
+      if (p.session_is_new === 1) merged.session_is_new = 1;
+      return merged as typeof next;
+    },
+  );
+}
+
+function emitAction(data: Record<string, unknown>) {
+  emitEvent(() => data);
 }
 
 export function initEvents() {
+  initViews(emitViewUpdate, (loc) =>
+    viewUrl(loc, getConfig().viewUrlQueryParams),
+  );
+  initActions(emitAction);
   initErrorTracking();
   initConsoleTracking();
-  initWebVitals();
   initResourceTracking();
-  initPageLoadTracking();
   initFetchPatching();
   initXHRPatching();
   initIframePatching();
   initLongTaskTracking();
-  initViewMetricsVisibility();
 }
 
 function initErrorTracking() {
@@ -327,6 +397,7 @@ function initErrorTracking() {
           own,
         ),
         error_source: 'source',
+        error_handling: 'unhandled',
       };
     });
   };
@@ -374,6 +445,7 @@ function recordRejection(reason: any) {
       error_type: reason?.name ?? 'UnhandledRejection',
       error_stack: sanitizeStack(reason?.stack ?? '', raw),
       error_source: 'promise',
+      error_handling: 'unhandled',
     };
   });
 }
@@ -519,11 +591,29 @@ function initConsoleTracking() {
       // recording it does.
       try {
         const msg = sanitizeMessage(consoleMessage(args));
-        emitEvent(() => ({
-          event_type: 'console',
-          console_level: level,
-          console_message: msg,
-        }));
+        // An Error passed to console.error is the same error
+        // Datadog groups with the thrown one: keep its type and
+        // stack, so both land in one issue.
+        const err =
+          level === 'error' ? args.find(isErrorLike) : undefined;
+        emitEvent(() => {
+          const d: Record<string, unknown> = {
+            event_type: 'console',
+            console_level: level,
+            console_message: msg,
+          };
+          if (err) {
+            d.error_type = err.name;
+            d.error_message = sanitizeMessage(err.message);
+            d.error_stack = sanitizeStack(
+              (err as any).stack ?? '',
+              err.message,
+            );
+            d.error_source = 'console';
+            d.error_handling = 'handled';
+          }
+          return d;
+        });
       } catch {
         // Recording failed; the call itself still goes through.
       }
@@ -538,83 +628,6 @@ function initConsoleTracking() {
       console[level] = original;
     });
   }
-}
-
-const viewMetrics: Record<string, number> = {};
-let viewFlushTimer: ReturnType<
-  typeof setTimeout
-> | null = null;
-let viewFirstMetricAt = 0;
-let viewLastSnapshot = '';
-
-function flushViewMetrics() {
-  const snap = JSON.stringify(viewMetrics);
-  if (snap === viewLastSnapshot) return;
-  viewLastSnapshot = snap;
-  viewFirstMetricAt = 0;
-  const loadMs =
-    viewMetrics.page_load_ms ||
-    viewMetrics.lcp ||
-    viewMetrics.dom_complete_ms ||
-    0;
-  const hasLoadTiming = loadMs > 0;
-  emitViewEvent(() => ({
-    event_type: hasLoadTiming
-      ? 'page_load'
-      : 'view',
-    page_load_ms: loadMs,
-    lcp_ms: viewMetrics.lcp ?? 0,
-    fid_ms: viewMetrics.fid ?? 0,
-    inp_ms: viewMetrics.inp ?? 0,
-    cls: viewMetrics.cls ?? 0,
-    fcp_ms: viewMetrics.fcp ?? 0,
-    ttfb_ms: viewMetrics.ttfb ?? 0,
-    dns_ms: viewMetrics.dns_ms ?? 0,
-    connect_ms: viewMetrics.connect_ms ?? 0,
-    dom_interactive_ms:
-      viewMetrics.dom_interactive_ms ?? 0,
-    dom_complete_ms:
-      viewMetrics.dom_complete_ms ?? 0,
-  }));
-}
-
-function scheduleViewMetricsFlush() {
-  const now = Date.now();
-  if (!viewFirstMetricAt) viewFirstMetricAt = now;
-
-  const elapsed = now - viewFirstMetricAt;
-  const remaining = Math.max(0, 5000 - elapsed);
-
-  if (viewFlushTimer) {
-    clearTimeout(viewFlushTimer);
-  }
-  viewFlushTimer = setTimeout(() => {
-    viewFlushTimer = null;
-    flushViewMetrics();
-  }, remaining);
-}
-
-function initViewMetricsVisibility() {
-  if (typeof document === 'undefined') return;
-  const handler = () => {
-    if (document.visibilityState === 'hidden') {
-      if (viewFlushTimer) {
-        clearTimeout(viewFlushTimer);
-        viewFlushTimer = null;
-      }
-      flushViewMetrics();
-    }
-  };
-  document.addEventListener(
-    'visibilitychange',
-    handler,
-  );
-  teardownFns.push(() => {
-    document.removeEventListener(
-      'visibilitychange',
-      handler,
-    );
-  });
 }
 
 /**
@@ -742,33 +755,6 @@ export function initVisibilityTracking() {
   });
 }
 
-function initWebVitals() {
-  onLCP((m) => {
-    viewMetrics.lcp = m.value;
-    scheduleViewMetricsFlush();
-  });
-  onFID((m) => {
-    viewMetrics.fid = m.value;
-    scheduleViewMetricsFlush();
-  });
-  onINP((m) => {
-    viewMetrics.inp = m.value;
-    scheduleViewMetricsFlush();
-  });
-  onCLS((m) => {
-    viewMetrics.cls = m.value;
-    scheduleViewMetricsFlush();
-  });
-  onFCP((m) => {
-    viewMetrics.fcp = m.value;
-    scheduleViewMetricsFlush();
-  });
-  onTTFB((m) => {
-    viewMetrics.ttfb = m.value;
-    scheduleViewMetricsFlush();
-  });
-}
-
 function isOodleInternalUrl(url: string): boolean {
   const endpoint = getConfig().endpoint;
   return url.startsWith(endpoint);
@@ -801,17 +787,18 @@ function initResourceTracking() {
         }
 
         const url = sanitizeResourceUrl(res.name);
-        const dur = res.duration;
-        const sz = res.transferSize ?? 0;
-        const init = initiator;
+        const timing = resourceTimingFields(res);
+        const type = resourceType(initiator, res.name);
         emitEventDeferred(
           () => ({
             event_type: 'resource',
             resource_url: url,
             resource_method: '',
-            resource_duration_ms: dur,
-            resource_size: sz,
-            resource_type: init,
+            resource_duration_ms: Math.round(res.duration),
+            resource_size: res.transferSize ?? 0,
+            resource_type: type,
+            resource_status: (res as any).responseStatus ?? 0,
+            ...timing,
           }),
         );
       }
@@ -839,6 +826,89 @@ function initResourceTracking() {
       );
     });
   }
+}
+
+/**
+ * Datadog's resource types. The browser's initiatorType says
+ * which element asked (`link`, `img`, `script`), not what came
+ * back, so the file extension decides when it is clearer.
+ */
+export function resourceType(initiator: string, url: string): string {
+  if (initiator === 'xmlhttprequest') return 'xhr';
+  if (initiator === 'fetch') return 'fetch';
+  if (initiator === 'beacon') return 'beacon';
+  let path = url;
+  try {
+    path = new URL(url, 'http://x').pathname;
+  } catch {
+    // Keep the raw string.
+  }
+  // The extension first: a stylesheet that loads a font or an
+  // image is the initiator, not the type.
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  if (['woff', 'woff2', 'ttf', 'otf', 'eot'].includes(ext)) return 'font';
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'avif', 'ico', 'bmp'].includes(ext)) {
+    return 'image';
+  }
+  if (['mp4', 'webm', 'mp3', 'ogg', 'wav', 'm4a'].includes(ext)) return 'media';
+  if (['js', 'mjs', 'cjs'].includes(ext)) return 'js';
+  if (ext === 'css') return 'css';
+  if (initiator === 'script') return 'js';
+  if (initiator === 'img' || initiator === 'image') return 'image';
+  if (initiator === 'video' || initiator === 'audio') return 'media';
+  if (initiator === 'link' || initiator === 'css') return 'css';
+  if (initiator === 'navigation' || initiator === 'iframe') return 'document';
+  return 'other';
+}
+
+/**
+ * The phases Datadog shows in a resource's waterfall. Zero when
+ * the server sends no Timing-Allow-Origin header: the browser
+ * then hides the phases of a cross-origin request.
+ */
+export function resourceTimingFields(
+  r: PerformanceResourceTiming,
+): Record<string, number> {
+  const d = (a: number, b: number) => (a > 0 && b > 0 && b >= a ? Math.round(b - a) : 0);
+  return {
+    resource_redirect_ms: d(r.redirectStart, r.redirectEnd),
+    resource_dns_ms: d(r.domainLookupStart, r.domainLookupEnd),
+    resource_connect_ms: d(r.connectStart, r.connectEnd),
+    resource_ssl_ms: d(r.secureConnectionStart, r.connectEnd),
+    resource_first_byte_ms: d(r.requestStart, r.responseStart),
+    resource_download_ms: d(r.responseStart, r.responseEnd),
+    resource_start_ms: Math.round(r.startTime),
+    resource_encoded_size: r.encodedBodySize ?? 0,
+    resource_decoded_size: r.decodedBodySize ?? 0,
+    resource_render_blocking:
+      (r as any).renderBlockingStatus === 'blocking' ? 1 : 0,
+  };
+}
+
+/**
+ * The timing entry the browser made for a fetch or XHR. It is
+ * found by URL and start time, best effort: an entry appears
+ * only once the body is read, and a buffer that is full has none.
+ */
+function timingForRequest(url: string, startPerf: number): Record<string, number> {
+  try {
+    const entries = performance.getEntriesByName(
+      resolveUrl(url),
+      'resource',
+    ) as PerformanceResourceTiming[];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.startTime >= startPerf - 2) {
+        return {
+          ...resourceTimingFields(e),
+          resource_size: e.transferSize ?? 0,
+        };
+      }
+    }
+  } catch {
+    // No timing entry: the request is still sent without one.
+  }
+  return {};
 }
 
 function generateHexId(bytes: number): string {
@@ -1313,6 +1383,14 @@ function wrapFetch(
     const start = performance.now();
     const decisions =
       resolveUrlDecisions(url);
+    requestStarted();
+    let ended = false;
+    const endActivity = () => {
+      if (!ended) {
+        ended = true;
+        requestEnded();
+      }
+    };
 
     let traceId = '';
     let spanId = '';
@@ -1366,6 +1444,7 @@ function wrapFetch(
     return origFetch
       .apply(target, [input, init] as any)
       .then((response: Response) => {
+        endActivity();
         const status = response.status;
         const dur = Math.round(
           performance.now() - start,
@@ -1390,6 +1469,7 @@ function wrapFetch(
             resource_duration_ms: dur,
             resource_size: 0,
             resource_type: 'fetch',
+            ...timingForRequest(url, start),
           };
           if (traceId) {
             d.trace_id = traceId;
@@ -1448,6 +1528,7 @@ function wrapFetch(
         return response;
       })
       .catch((err: unknown) => {
+        endActivity();
         const dur = Math.round(
           performance.now() - start,
         );
@@ -1617,6 +1698,7 @@ function wrapXHR(
 
     const start = performance.now();
     const xhrThis = this;
+    requestStarted();
     const tid = traceId;
     const sid = spanId;
     const reqBody = requestBody;
@@ -1626,6 +1708,7 @@ function wrapXHR(
     this.addEventListener(
       'loadend',
       () => {
+        requestEnded();
         const dur = Math.round(
           performance.now() - start,
         );
@@ -1644,6 +1727,7 @@ function wrapXHR(
             resource_duration_ms: dur,
             resource_size: 0,
             resource_type: 'xhr',
+            ...timingForRequest(xhrUrl, start),
           };
           if (tid) {
             d.trace_id = tid;
@@ -1831,76 +1915,6 @@ function initIframePatching() {
   });
 }
 
-function initPageLoadTracking() {
-  if (typeof window === 'undefined') return;
-  if (
-    typeof PerformanceObserver === 'undefined'
-  ) {
-    return;
-  }
-
-  const collect = () => {
-    const nav = performance.getEntriesByType(
-      'navigation',
-    )[0] as
-      | PerformanceNavigationTiming
-      | undefined;
-    if (!nav) return;
-    viewMetrics.page_load_ms = Math.round(
-      nav.loadEventEnd - nav.startTime,
-    );
-    viewMetrics.dns_ms = Math.round(
-      nav.domainLookupEnd -
-        nav.domainLookupStart,
-    );
-    viewMetrics.connect_ms = Math.round(
-      nav.connectEnd - nav.connectStart,
-    );
-    viewMetrics.tls_ms = Math.round(
-      nav.secureConnectionStart > 0
-        ? nav.connectEnd -
-            nav.secureConnectionStart
-        : 0,
-    );
-    viewMetrics.ttfb = Math.round(
-      nav.responseStart - nav.requestStart,
-    );
-    viewMetrics.download_ms = Math.round(
-      nav.responseEnd - nav.responseStart,
-    );
-    viewMetrics.dom_interactive_ms = Math.round(
-      nav.domInteractive - nav.startTime,
-    );
-    viewMetrics.dom_complete_ms = Math.round(
-      nav.domComplete - nav.startTime,
-    );
-    scheduleViewMetricsFlush();
-  };
-
-  let tryCount = 0;
-  const tryCollect = () => {
-    tryCount++;
-    const nav = performance.getEntriesByType(
-      'navigation',
-    )[0] as
-      | PerformanceNavigationTiming
-      | undefined;
-    if (nav && nav.loadEventEnd > 0) {
-      collect();
-    } else if (tryCount < 50) {
-      setTimeout(tryCollect, 200);
-    }
-  };
-
-  if (document.readyState === 'complete') {
-    setTimeout(tryCollect, 100);
-  } else {
-    window.addEventListener('load', () => {
-      setTimeout(tryCollect, 100);
-    });
-  }
-}
-
 function initLongTaskTracking() {
   if (
     typeof PerformanceObserver === 'undefined'
@@ -1986,42 +2000,6 @@ function initLoAFTracking(): boolean {
   }
 }
 
-export function trackPageView() {
-  emitEvent(() => ({
-    event_type: 'view',
-  }));
-}
-
-export function trackAction(
-  type: string,
-  target: string,
-  selector: string,
-  text: string,
-  isFrustration: boolean,
-  clickX?: number,
-  clickY?: number,
-) {
-  emitEvent(() => {
-    const data: Record<string, unknown> = {
-      event_type: 'action',
-      action_type: type,
-      action_target: target,
-      action_selector: selector,
-      action_text: text,
-      is_frustration: isFrustration ? 1 : 0,
-    };
-    if (clickX !== undefined) {
-      data.click_x = clickX;
-      data.click_y = clickY;
-      data.viewport_width =
-        window.innerWidth;
-      data.viewport_height =
-        window.innerHeight;
-    }
-    return data;
-  });
-}
-
 export function trackCustomEvent(
   name: string,
   properties?: Record<string, unknown>,
@@ -2035,33 +2013,71 @@ export function trackCustomEvent(
   }));
 }
 
-function getDeviceType(): string {
-  const ua = navigator.userAgent;
-  if (/Mobi|Android/i.test(ua)) return 'mobile';
-  if (/Tablet|iPad/i.test(ua)) return 'tablet';
+export function getDeviceType(ua: string): string {
+  if (/iPad|Tablet/i.test(ua) || (/Android/i.test(ua) && !/Mobi/i.test(ua))) {
+    return 'tablet';
+  }
+  if (/Mobi|iPhone|iPod|Android/i.test(ua)) return 'mobile';
   return 'desktop';
 }
 
-function getBrowserName(): string {
-  const ua = navigator.userAgent;
-  if (ua.includes('Firefox')) return 'Firefox';
-  if (ua.includes('Edg/')) return 'Edge';
-  if (ua.includes('Chrome')) return 'Chrome';
+/**
+ * Order matters: Edge and Opera say "Chrome", Chrome says
+ * "Safari", and Chrome and Firefox on iOS name themselves
+ * CriOS and FxiOS.
+ */
+const BROWSERS: Array<[string, RegExp]> = [
+  ['Edge', /Edg(?:e|A|iOS)?\/([\d.]+)/],
+  ['Opera', /(?:OPR|Opera)\/([\d.]+)/],
+  ['Samsung Internet', /SamsungBrowser\/([\d.]+)/],
+  ['Firefox', /(?:Firefox|FxiOS)\/([\d.]+)/],
+  ['Chrome', /(?:Chrome|CriOS)\/([\d.]+)/],
+  ['Safari', /Version\/([\d.]+).*Safari/],
+];
+
+export function getBrowserName(ua: string): string {
+  for (const [name, re] of BROWSERS) if (re.test(ua)) return name;
   if (ua.includes('Safari')) return 'Safari';
   return 'Other';
 }
 
-function getOSName(): string {
-  const ua = navigator.userAgent;
+export function getBrowserVersion(ua: string): string {
+  for (const [, re] of BROWSERS) {
+    const m = ua.match(re);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+/**
+ * Checked before the desktop systems: an iPhone says "like Mac
+ * OS X" and Android says "Linux".
+ */
+export function getOSName(ua: string): string {
+  if (/iPhone|iPad|iPod/.test(ua)) return 'iOS';
+  if (ua.includes('Android')) return 'Android';
+  if (ua.includes('CrOS')) return 'Chrome OS';
   if (ua.includes('Windows')) return 'Windows';
   if (ua.includes('Mac OS')) return 'macOS';
   if (ua.includes('Linux')) return 'Linux';
-  if (ua.includes('Android')) return 'Android';
-  if (/iPhone|iPad|iPod/.test(ua)) return 'iOS';
   return 'Other';
 }
 
+export function getOSVersion(ua: string): string {
+  let m = ua.match(/OS (\d+[_.]\d+(?:[_.]\d+)?) like Mac OS X/);
+  if (m) return m[1].replace(/_/g, '.');
+  m = ua.match(/Android ([\d.]+)/);
+  if (m) return m[1];
+  m = ua.match(/Windows NT ([\d.]+)/);
+  if (m) return m[1];
+  m = ua.match(/Mac OS X (\d+[_.]\d+(?:[_.]\d+)?)/);
+  if (m) return m[1].replace(/_/g, '.');
+  return '';
+}
+
 export function destroyEvents() {
+  destroyActions();
+  destroyViews();
   for (const fn of teardownFns) {
     fn();
   }

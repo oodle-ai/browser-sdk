@@ -12,6 +12,7 @@ import {
   isReplaySampled,
   initSessionListeners,
   destroySessionListeners,
+  touchSession,
 } from './core/session';
 import {
   setUser,
@@ -35,8 +36,6 @@ import {
 import {
   initEvents,
   initVisibilityTracking,
-  trackPageView,
-  trackAction,
   trackCustomEvent,
   destroyEvents,
 } from './events/faro';
@@ -44,29 +43,12 @@ import {
   initReplay,
   stopReplay,
 } from './replay/recorder';
-import { isActionTextMasked } from './core/privacy';
 import {
   initTelemetry,
   destroyTelemetry,
 } from './core/telemetry';
 
-const NativeMutationObserver =
-  typeof MutationObserver !== 'undefined'
-    ? MutationObserver
-    : null;
-
 let initialized = false;
-let teardownNavigation: (() => void) | null =
-  null;
-let teardownClickTracking: (() => void) | null =
-  null;
-
-let pendingActivityObserver:
-  MutationObserver
-  | null = null;
-let pendingActivityTimer:
-  ReturnType<typeof setTimeout>
-  | null = null;
 
 export const OodleRum = {
   init(config: OodleRumConfig) {
@@ -78,6 +60,9 @@ export const OodleRum = {
       config.replaySampleRate ?? 100,
     );
     initialized = true;
+    // A page load is user activity: it starts a session when
+    // none is live, before anything reads the sampling decision.
+    touchSession();
 
     // Ahead of initTransportListeners: a tab_hidden event
     // only makes it out of the page if it is queued before
@@ -100,11 +85,6 @@ export const OodleRum = {
     }
 
     initEvents();
-
-    teardownNavigation =
-      setupNavigationTracking();
-    teardownClickTracking =
-      setupClickTracking();
 
     if (config.openTelemetry) {
       import('./otel/tracing').then((m) =>
@@ -174,291 +154,9 @@ export const OodleRum = {
     flushAll(true);
     clearFeatureFlags();
     destroyTransportListeners();
-    if (teardownNavigation) {
-      teardownNavigation();
-      teardownNavigation = null;
-    }
-    if (teardownClickTracking) {
-      teardownClickTracking();
-      teardownClickTracking = null;
-    }
-    cleanupPendingActivity();
     initialized = false;
   },
 };
-
-function setupNavigationTracking():
-  (() => void) | null {
-  if (typeof window === 'undefined') return null;
-
-  const originalPushState = history.pushState;
-  history.pushState = function (...args) {
-    originalPushState.apply(this, args);
-    trackPageView();
-  };
-
-  const originalReplaceState =
-    history.replaceState;
-  history.replaceState = function (...args) {
-    originalReplaceState.apply(this, args);
-    trackPageView();
-  };
-
-  const onPopState = () => trackPageView();
-  window.addEventListener(
-    'popstate',
-    onPopState,
-  );
-
-  return () => {
-    history.pushState = originalPushState;
-    history.replaceState = originalReplaceState;
-    window.removeEventListener(
-      'popstate',
-      onPopState,
-    );
-  };
-}
-
-function cleanupPendingActivity() {
-  if (pendingActivityObserver) {
-    pendingActivityObserver.disconnect();
-    pendingActivityObserver = null;
-  }
-  if (pendingActivityTimer) {
-    clearTimeout(pendingActivityTimer);
-    pendingActivityTimer = null;
-  }
-}
-
-function setupClickTracking():
-  (() => void) | null {
-  if (typeof document === 'undefined') {
-    return null;
-  }
-
-  const RAGE_THRESHOLD = 3;
-  const RAGE_WINDOW_MS = 1000;
-  const DEAD_CLICK_WAIT_MS = 1000;
-
-  let recentClicks: {
-    selector: string;
-    time: number;
-  }[] = [];
-
-  const onClick = (e: Event) => {
-    const target = (
-      e as MouseEvent
-    ).target as HTMLElement;
-    if (!target) return;
-
-    const selector = getSelector(target);
-    const tagName =
-      target.tagName?.toLowerCase() ?? '';
-    // A name the app chose for the element (or an ancestor)
-    // wins over its text, and is sent even when text is
-    // masked: it was written to be sent.
-    const chosenName = getChosenActionName(target);
-    const masked =
-      chosenName === null && isActionTextMasked(target);
-    const text =
-      chosenName ??
-      (masked
-        ? ''
-        : (target.textContent ?? '')
-            .trim()
-            .slice(0, 200));
-    const targetName =
-      chosenName !== null
-        ? `${tagName}[${chosenName}]`
-        : getTargetName(target, tagName, text, masked);
-    const now = Date.now();
-    const clickX = (e as MouseEvent).clientX;
-    const clickY = (e as MouseEvent).clientY;
-
-    recentClicks.push({ selector, time: now });
-    recentClicks = recentClicks.filter(
-      (c) => now - c.time < RAGE_WINDOW_MS,
-    );
-
-    const sameTarget = recentClicks.filter(
-      (c) => c.selector === selector,
-    );
-    if (sameTarget.length >= RAGE_THRESHOLD) {
-      trackAction(
-        'rage_click',
-        targetName,
-        selector,
-        text,
-        true,
-        clickX,
-        clickY,
-      );
-      recentClicks = [];
-      return;
-    }
-
-    detectDeadClick(
-      target,
-      targetName,
-      selector,
-      text,
-      clickX,
-      clickY,
-    );
-  };
-
-  document.addEventListener('click', onClick, {
-    capture: true,
-    passive: true,
-  });
-
-  function detectDeadClick(
-    target: HTMLElement,
-    targetName: string,
-    selector: string,
-    text: string,
-    clickX: number,
-    clickY: number,
-  ) {
-    const tag =
-      target.tagName?.toLowerCase() ?? '';
-    const isInteractive =
-      tag === 'a' ||
-      tag === 'button' ||
-      tag === 'input' ||
-      tag === 'select' ||
-      tag === 'textarea' ||
-      target.hasAttribute('onclick') ||
-      target.getAttribute('role') ===
-        'button' ||
-      target.closest('a, button') !== null;
-
-    if (!isInteractive) {
-      trackAction(
-        'click',
-        targetName,
-        selector,
-        text,
-        false,
-        clickX,
-        clickY,
-      );
-      return;
-    }
-
-    cleanupPendingActivity();
-
-    if (!NativeMutationObserver) return;
-    pendingActivityObserver =
-      new NativeMutationObserver(() => {
-        cleanupPendingActivity();
-        trackAction(
-          'click',
-          targetName,
-          selector,
-          text,
-          false,
-          clickX,
-          clickY,
-        );
-      });
-
-    pendingActivityObserver.observe(
-      document.body,
-      {
-        childList: true,
-        subtree: true,
-      },
-    );
-
-    pendingActivityTimer = setTimeout(() => {
-      cleanupPendingActivity();
-      trackAction(
-        'dead_click',
-        targetName,
-        selector,
-        text,
-        false,
-        clickX,
-        clickY,
-      );
-    }, DEAD_CLICK_WAIT_MS);
-  }
-
-  return () => {
-    document.removeEventListener(
-      'click',
-      onClick,
-      { capture: true } as EventListenerOptions,
-    );
-    cleanupPendingActivity();
-  };
-}
-
-const ACTION_NAME_ATTR = 'data-oodle-action-name';
-
-function getChosenActionName(el: HTMLElement): string | null {
-  try {
-    const named =
-      typeof el.closest === 'function'
-        ? el.closest(`[${ACTION_NAME_ATTR}]`)
-        : null;
-    const v = named?.getAttribute(ACTION_NAME_ATTR)?.trim();
-    return v ? v.slice(0, 200) : null;
-  } catch {
-    return null;
-  }
-}
-
-function getTargetName(
-  el: HTMLElement,
-  tagName: string,
-  text: string,
-  masked = false,
-): string {
-  // aria-label and title are text a user reads, and often
-  // hold the same data as the element's content.
-  if (masked) return getIdOrClassName(el, tagName);
-  const ariaLabel =
-    el.getAttribute('aria-label');
-  if (ariaLabel) {
-    return `${tagName}[${ariaLabel}]`;
-  }
-  const title = el.getAttribute('title');
-  if (title) return `${tagName}[${title}]`;
-  const shortText = text.split('\n')[0].trim();
-  if (shortText && shortText.length <= 80) {
-    return `${tagName}[${shortText}]`;
-  }
-  return getIdOrClassName(el, tagName);
-}
-
-function getIdOrClassName(
-  el: HTMLElement,
-  tagName: string,
-): string {
-  if (el.id) return `${tagName}#${el.id}`;
-  const classes = Array.from(
-    el.classList ?? [],
-  )
-    .slice(0, 3)
-    .join('.');
-  if (classes) return `${tagName}.${classes}`;
-  return tagName;
-}
-
-function getSelector(el: HTMLElement): string {
-  if (el.id) return `#${el.id}`;
-  const tag =
-    el.tagName?.toLowerCase() ?? '';
-  const classes = Array.from(
-    el.classList ?? [],
-  )
-    .slice(0, 3)
-    .join('.');
-  return classes ? `${tag}.${classes}` : tag;
-}
 
 export type {
   NetworkCapture,

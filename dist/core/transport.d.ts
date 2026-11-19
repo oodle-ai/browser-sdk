@@ -8,7 +8,13 @@ type Payload = Record<string, unknown>;
  */
 export declare function setReplayDropHandler(cb: () => void): void;
 export declare function enqueue(batchKey: string, item: Payload, bytesHint?: number): void;
-export declare function upsert(batchKey: string, key: string, item: Payload): void;
+/**
+ * Queues `item`, replacing a queued item with the same key.
+ * `merge` sees the item being replaced and the new one, so a
+ * flag only the first of them carries (a view's first update)
+ * is not lost when a later one replaces it.
+ */
+export declare function upsert(batchKey: string, key: string, item: Payload, merge?: (prev: Payload, next: Payload) => Payload): void;
 /**
  * Registers a producer that keeps its own buffer, so an
  * exit flush can collect from it before building the

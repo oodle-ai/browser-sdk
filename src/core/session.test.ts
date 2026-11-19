@@ -7,82 +7,230 @@ import {
   vi,
 } from 'vitest';
 
-const SESSION_KEY = '__oodle_session';
-const HOUR = 60 * 60 * 1000;
+/**
+ * Node 22+ puts its own `localStorage` on the global, and without
+ * --localstorage-file it has no methods; it hides jsdom's. Tabs
+ * share localStorage, so the tests need a working one.
+ */
+class MemoryStorage {
+  private m = new Map<string, string>();
+  get length() {
+    return this.m.size;
+  }
+  clear() {
+    this.m.clear();
+  }
+  getItem(k: string) {
+    return this.m.has(k) ? this.m.get(k)! : null;
+  }
+  setItem(k: string, v: string) {
+    this.m.set(k, String(v));
+  }
+  removeItem(k: string) {
+    this.m.delete(k);
+  }
+  key(i: number) {
+    return Array.from(this.m.keys())[i] ?? null;
+  }
+}
+Object.defineProperty(globalThis, 'localStorage', {
+  value: new MemoryStorage(),
+  configurable: true,
+});
 
-async function loadModule() {
+const SHARED_KEY = '__oodle_session_v2';
+const TAB_KEY = '__oodle_tab';
+const LEGACY_KEY = '__oodle_session';
+const MIN = 60 * 1000;
+const HOUR = 60 * MIN;
+
+/** A fresh module over the same storage: what a reload looks like. */
+async function reload() {
   vi.resetModules();
-  return import('./session');
+  const s = await import('./session');
+  s._resetSessionModule();
+  return s;
 }
 
+/** Another tab: same localStorage, its own sessionStorage. */
+async function otherTab() {
+  sessionStorage.clear();
+  return reload();
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  sessionStorage.clear();
+  localStorage.clear();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('session lifetime', () => {
+  it('has no session before any activity', async () => {
+    const s = await reload();
+    expect(s.getSessionId()).toBe('');
+  });
+
+  it('starts one on activity and keeps it while the user is active', async () => {
+    const s = await reload();
+    s.touchSession();
+    const id = s.getSessionId();
+    expect(id).not.toBe('');
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    s.touchSession();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    expect(s.getSessionId()).toBe(id);
+  });
+
+  it('expires after 15 minutes without activity and is not renewed by background work', async () => {
+    const s = await reload();
+    s.touchSession();
+    vi.setSystemTime(Date.now() + 16 * MIN);
+    // An event from a timer or a poll: nothing is recorded.
+    expect(s.getSessionId()).toBe('');
+    expect(s.getSessionId()).toBe('');
+  });
+
+  it('starts the next session on the next user activity and tells listeners', async () => {
+    const s = await reload();
+    s.touchSession();
+    const first = s.getSessionId();
+    const renewed = vi.fn();
+    s.onSessionRenewed(renewed);
+    vi.setSystemTime(Date.now() + 16 * MIN);
+    s.touchSession();
+    const second = s.getSessionId();
+    expect(second).not.toBe('');
+    expect(second).not.toBe(first);
+    expect(renewed).toHaveBeenCalledWith(first, second);
+  });
+
+  it('ends at four hours even with constant activity', async () => {
+    const s = await reload();
+    s.touchSession();
+    const first = s.getSessionId();
+    for (let i = 0; i < 25; i++) {
+      vi.setSystemTime(Date.now() + 10 * MIN);
+      s.touchSession();
+    }
+    expect(s.getSessionId()).not.toBe(first);
+  });
+});
+
+describe('sessions across tabs', () => {
+  it('shares the session id and gives each tab its own tab id', async () => {
+    const a = await reload();
+    a.touchSession();
+    const sid = a.getSessionId();
+    const tabA = a.getTabId();
+
+    const b = await otherTab();
+    b.touchSession();
+    expect(b.getSessionId()).toBe(sid);
+    expect(b.getTabId()).not.toBe(tabA);
+  });
+
+  it('claims the session start exactly once, whichever tab sends first', async () => {
+    const a = await reload();
+    a.touchSession();
+    expect(a.claimSessionStart()).toBe(true);
+    expect(a.claimSessionStart()).toBe(false);
+
+    const b = await otherTab();
+    b.touchSession();
+    expect(b.claimSessionStart()).toBe(false);
+  });
+
+  it('keeps the tab id across a reload of the same tab', async () => {
+    const a = await reload();
+    a.touchSession();
+    const tab = a.getTabId();
+    const again = await reload();
+    expect(again.getTabId()).toBe(tab);
+  });
+});
+
 describe('replay segment indices', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    sessionStorage.clear();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('hands out increasing indices', async () => {
-    const s = await loadModule();
+  it('hands out increasing indices and writes each one at once', async () => {
+    const s = await reload();
+    s.touchSession();
     expect(s.nextReplaySegmentIndex()).toBe(0);
     expect(s.nextReplaySegmentIndex()).toBe(1);
-    expect(s.nextReplaySegmentIndex()).toBe(2);
-  });
-
-  it('persists each index immediately, not on a debounce', async () => {
-    const s = await loadModule();
-    s.nextReplaySegmentIndex();
-    s.nextReplaySegmentIndex();
-
-    // A reload that loses a debounced write would hand
-    // out an index that already names a stored object.
-    const raw = JSON.parse(
-      sessionStorage.getItem(SESSION_KEY)!,
-    );
-    expect(raw.replaySegmentSeq).toBe(2);
+    // A reload that loses a debounced write would hand out an
+    // index that already names a stored object.
+    expect(JSON.parse(sessionStorage.getItem(TAB_KEY)!).replaySegmentSeq).toBe(2);
   });
 
   it('continues across a page reload in the same session', async () => {
-    const first = await loadModule();
-    const idA = first.getSessionId();
-    expect(first.nextReplaySegmentIndex()).toBe(0);
-    expect(first.nextReplaySegmentIndex()).toBe(1);
-
-    // Fresh module state, same sessionStorage: exactly
-    // what a reload looks like.
-    const second = await loadModule();
-    expect(second.getSessionId()).toBe(idA);
-    expect(second.nextReplaySegmentIndex()).toBe(2);
+    const s = await reload();
+    s.touchSession();
+    s.nextReplaySegmentIndex();
+    s.nextReplaySegmentIndex();
+    const again = await reload();
+    again.touchSession();
+    expect(again.nextReplaySegmentIndex()).toBe(2);
   });
 
-  it('restarts indices under a new id when the session rotates', async () => {
-    const s = await loadModule();
-    const idA = s.getSessionId();
-    s.nextReplaySegmentIndex();
-    s.nextReplaySegmentIndex();
-
-    // Past the 4 hour cap.
-    vi.setSystemTime(Date.now() + 5 * HOUR);
-
-    const idB = s.getSessionId();
-    expect(idB).not.toBe(idA);
-    // Indices are namespaced by session id server-side,
-    // so restarting at 0 is safe and expected.
-    expect(s.nextReplaySegmentIndex()).toBe(0);
+  it('counts per tab, so two tabs in one session do not collide', async () => {
+    const a = await reload();
+    a.touchSession();
+    a.nextReplaySegmentIndex();
+    const b = await otherTab();
+    b.touchSession();
+    // Keys hold the tab id, so both may start at 0.
+    expect(b.nextReplaySegmentIndex()).toBe(0);
   });
 
-  it('restarts indices after the inactivity timeout', async () => {
-    const s = await loadModule();
-    const idA = s.getSessionId();
+  it('restarts under the next session', async () => {
+    const s = await reload();
+    s.touchSession();
     s.nextReplaySegmentIndex();
-
-    vi.setSystemTime(Date.now() + 31 * 60 * 1000);
-
-    expect(s.getSessionId()).not.toBe(idA);
+    vi.setSystemTime(Date.now() + 16 * MIN);
+    s.touchSession();
     expect(s.nextReplaySegmentIndex()).toBe(0);
+  });
+});
+
+describe('upgrade from a per-tab session', () => {
+  function writeLegacy(lastActivityAgo: number) {
+    const now = Date.now();
+    sessionStorage.setItem(
+      LEGACY_KEY,
+      JSON.stringify({
+        id: 'legacy-id',
+        createdAt: now - HOUR,
+        lastActivity: now - lastActivityAgo,
+        viewCount: 4,
+        errorCount: 1,
+        actionCount: 2,
+        sampled: true,
+        replaySampled: true,
+        replaySegmentSeq: 7,
+      }),
+    );
+  }
+
+  it('keeps the session, its replay path and its segment counter', async () => {
+    writeLegacy(5 * MIN);
+    const s = await reload();
+    s.touchSession();
+    expect(s.getSessionId()).toBe('legacy-id');
+    expect(s.isLegacyReplayTab()).toBe(true);
+    expect(s.nextReplaySegmentIndex()).toBe(7);
+    // Its start was counted by the old SDK.
+    expect(s.claimSessionStart()).toBe(false);
+    expect(JSON.parse(localStorage.getItem(SHARED_KEY)!).id).toBe('legacy-id');
+  });
+
+  it('does not adopt a session the old SDK would have ended', async () => {
+    writeLegacy(31 * MIN);
+    const s = await reload();
+    s.touchSession();
+    expect(s.getSessionId()).not.toBe('legacy-id');
+    expect(s.isLegacyReplayTab()).toBe(false);
   });
 });

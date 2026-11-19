@@ -65,7 +65,8 @@ vi.mock('../core/transport', () => ({
   },
 }));
 
-vi.mock('../core/session', () => ({
+vi.mock('../core/session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/session')>()),
   getSessionId: () => sessionId,
   nextReplaySegmentIndex: () => sessionSeq++,
 }));

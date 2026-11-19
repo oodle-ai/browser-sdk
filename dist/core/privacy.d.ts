@@ -107,4 +107,5 @@ export declare function sanitizeStack(stack: string, rawMessage: string): string
  */
 export declare const BLOCK_SELECTOR: string;
 export declare const MASK_TEXT_SELECTOR: string;
+export declare const ACTION_MASK_SELECTOR: string;
 export declare function isActionTextMasked(el: Element): boolean;

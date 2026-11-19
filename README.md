@@ -200,7 +200,11 @@ An action is named after what the user clicked. The clicked element
 and up to 10 parents are checked for a name they give themselves (a
 form label, a button's or link's text, `aria-label`,
 `aria-labelledby`, `alt`, `title`, `placeholder`), and failing that for
-visible text. The first line is used, cut at 80 characters.
+visible text. The first line is used, cut at 80 characters. A click in a masked part
+of the page, or with `actionText: 'mask'`, reads no text from the
+element or its parents. Text taken from a parent leaves out masked
+parts, form fields and editable text, and labels in a masked part are
+not used.
 
 A tab that becomes visible, or stays visible, keeps its session going
 but never starts a new one: only a user action does.

@@ -19,7 +19,7 @@
 
 import { waitForIdle } from '../core/activity';
 import { generateId } from '../core/session';
-import { isActionTextMasked } from '../core/privacy';
+import { ACTION_MASK_SELECTOR, isActionTextMasked } from '../core/privacy';
 import { currentViewId, currentViewPath } from './view';
 
 export const RAGE_CLICKS = 3;
@@ -229,7 +229,10 @@ function attr(el: HTMLElement, name: string): string {
 /** A name the element gives itself, in the order a reader would use. */
 function ownName(el: HTMLElement): string {
   const labels = (el as HTMLInputElement).labels;
-  if (labels && labels.length > 0) return firstLine(visibleText(labels[0] as HTMLElement));
+  if (labels && labels.length > 0) {
+    const label = labels[0] as HTMLElement;
+    if (!isActionTextMasked(label)) return firstLine(visibleText(label));
+  }
   if (el.tagName === 'INPUT') {
     const type = attr(el, 'type');
     if (type === 'button' || type === 'submit' || type === 'reset') {
@@ -248,7 +251,7 @@ function ownName(el: HTMLElement): string {
     const t = labelledBy
       .split(/\s+/)
       .map((id) => document.getElementById(id))
-      .filter((x): x is HTMLElement => !!x)
+      .filter((x): x is HTMLElement => !!x && !isActionTextMasked(x))
       .map((x) => visibleText(x))
       .join(' ');
     if (t.trim()) return firstLine(t);
@@ -280,9 +283,46 @@ function findActionName(target: HTMLElement): { el: HTMLElement; name: string } 
 }
 
 /** The text a user reads on an element, with its line breaks. */
+/**
+ * Parts of an element whose text an action must not carry: text the
+ * replay masks, and what the user typed or picked. A click name read
+ * from a parent covers its children too, so these are cut out of it.
+ */
+const KEEP_OUT_SELECTOR =
+  ACTION_MASK_SELECTOR + ',[contenteditable],input,textarea,select,script,style';
+
 function visibleText(el: HTMLElement): string {
-  const t = (el as HTMLElement & { innerText?: string }).innerText;
-  return (typeof t === 'string' && t ? t : el.textContent ?? '').trim();
+  let hasKeptOut = true;
+  try {
+    hasKeptOut = el.querySelector(KEEP_OUT_SELECTOR) !== null;
+  } catch {
+    hasKeptOut = true;
+  }
+  if (!hasKeptOut) {
+    const t = (el as HTMLElement & { innerText?: string }).innerText;
+    return (typeof t === 'string' && t ? t : el.textContent ?? '').trim();
+  }
+  // Collect the text outside the kept-out parts. Each text node is its
+  // own line, so a name is never joined across a cut-out part.
+  const lines: string[] = [];
+  const walk = (node: Node) => {
+    for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) {
+        const t = (c.nodeValue ?? '').trim();
+        if (t) lines.push(t);
+      } else if (c.nodeType === 1) {
+        let out = true;
+        try {
+          out = (c as Element).matches(KEEP_OUT_SELECTOR);
+        } catch {
+          out = true;
+        }
+        if (!out) walk(c);
+      }
+    }
+  };
+  walk(el);
+  return lines.join('\n');
 }
 
 // When the user last changed a field or scrolled.
@@ -293,19 +333,19 @@ export function onClick(e: MouseEvent) {
   if (!target || typeof target.tagName !== 'string') return;
   const selector = getSelector(target);
   const chosenName = getChosenActionName(target);
-  const found = chosenName === null ? findActionName(target) : null;
+  // A click in a masked part, or with action text masked, reads no text
+  // from the page at all: not from the element and not from its parents.
+  const masked = chosenName === null && isActionTextMasked(target);
+  const found = chosenName === null && !masked ? findActionName(target) : null;
   const named = found?.el ?? target;
   const tagName = named.tagName.toLowerCase();
-  const masked = chosenName === null && isActionTextMasked(named);
-  const text = chosenName ?? (masked ? '' : visibleText(named).slice(0, 200));
+  const text = chosenName ?? (found ? visibleText(named).slice(0, 200) : '');
   const targetName =
     chosenName !== null
       ? `${tagName}[${chosenName}]`
-      : masked
-        ? getIdOrClassName(named, tagName)
-        : found
-          ? `${tagName}[${found.name}]`
-          : getIdOrClassName(target, target.tagName.toLowerCase());
+      : found
+        ? `${tagName}[${found.name}]`
+        : getIdOrClassName(target, tagName);
 
   const a: ClickAction = {
     id: generateId(),

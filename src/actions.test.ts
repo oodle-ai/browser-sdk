@@ -159,6 +159,51 @@ describe('click actions', () => {
     expect(sent[0].action_target).toBe('div[Close panel]');
   });
 
+  it('read no text from parents when the click is in a masked part', async () => {
+    await load();
+    document.body.innerHTML =
+      '<button aria-label="Pay now">Pay <span data-oodle-privacy="mask"><i id="m">4111 1111</i></span></button>';
+    clickOn('m');
+    await settle();
+    expect(sent[0].action_target).toBe('i#m');
+    expect(sent[0].action_text).toBe('');
+    expect(JSON.stringify(sent[0])).not.toContain('Pay');
+  });
+
+  it('cut masked children, typed text and editable text out of a parent name', async () => {
+    await load();
+    document.body.innerHTML =
+      '<div id="d"><span class="oodle-privacy-mask">Jane Doe</span>' +
+      '<textarea>secret draft</textarea><div contenteditable>typed note</div>' +
+      '<select><option>Gold plan</option></select>Card summary</div>';
+    clickOn('d');
+    await settle();
+    const all = JSON.stringify(sent[0]);
+    expect(sent[0].action_target).toBe('div[Card summary]');
+    for (const secret of ['Jane Doe', 'secret draft', 'typed note', 'Gold plan']) {
+      expect(all).not.toContain(secret);
+    }
+  });
+
+  it('skip a masked label and a masked aria-labelledby source', async () => {
+    await load();
+    document.body.innerHTML =
+      '<label for="e" class="oodle-privacy-mask">jane@example.com</label>' +
+      '<span id="n" data-oodle-privacy="hidden">Jane</span>' +
+      '<input id="e" type="checkbox" aria-labelledby="n" title="Subscribe" />';
+    clickOn('e');
+    await settle();
+    expect(sent[0].action_target).toBe('input[Subscribe]');
+  });
+
+  it('send no name from parents with actionText mask', async () => {
+    await load({ actionText: 'mask' });
+    document.body.innerHTML = '<button aria-label="Delete user Jane"><svg id="i"></svg></button>';
+    clickOn('i');
+    await settle();
+    expect(JSON.stringify(sent[0])).not.toContain('Jane');
+  });
+
   it('does not call a click on a link dead', async () => {
     await load();
     document.body.innerHTML = '<a id="l" href="/next"><span id="t">Next</span></a>';

@@ -40,7 +40,7 @@ export type EmitView = (
 interface ViewState {
   id: string;
   sessionId: string;
-  loadingType: 'initial_load' | 'route_change';
+  loadingType: 'initial_load' | 'route_change' | 'bf_cache';
   startEpoch: number;
   startPerf: number;
   url: string;
@@ -363,6 +363,10 @@ function initPageLoadVitals(v: ViewState) {
 }
 
 let lastKey = '';
+// Set while the page is being left. Events still fire after pagehide
+// (a last request, the replay flush), and without this each one would
+// open a new view at the moment the page closes.
+let pageLeft = false;
 
 function onLocationChange() {
   const key = viewKey(window.location);
@@ -377,6 +381,7 @@ export function initViews(
 ) {
   if (typeof window === 'undefined') return;
   destroyViews();
+  pageLeft = false;
   emit = emitView;
   urlOf = viewUrl;
   lastKey = viewKey(window.location);
@@ -410,8 +415,20 @@ export function initViews(
     if (document.visibilityState === 'hidden') flushViewUpdate();
   };
   document.addEventListener('visibilitychange', onHidden);
-  const onPageHide = () => endView();
+  const onPageHide = () => {
+    endView();
+    pageLeft = true;
+  };
   window.addEventListener('pagehide', onPageHide);
+  // A page restored from the back/forward cache is shown again
+  // without a load, so it starts a view of its own.
+  const onPageShow = (e: PageTransitionEvent) => {
+    if (!e.persisted) return;
+    pageLeft = false;
+    lastKey = viewKey(window.location);
+    startView('bf_cache', Date.now(), perfNow());
+  };
+  window.addEventListener('pageshow', onPageShow);
 
   const offRenew = onSessionRenewed((previousId) => {
     // The view that was open belongs to the old session; its
@@ -431,6 +448,7 @@ export function initViews(
     window.removeEventListener('hashchange', onLocationChange);
     document.removeEventListener('visibilitychange', onHidden);
     window.removeEventListener('pagehide', onPageHide);
+    window.removeEventListener('pageshow', onPageShow);
     offRenew();
   });
 }
@@ -441,7 +459,7 @@ export function initViews(
  * expired and nothing was recorded until now).
  */
 export function ensureView() {
-  if (current || !emit || typeof window === 'undefined') return;
+  if (current || pageLeft || !emit || typeof window === 'undefined') return;
   lastKey = viewKey(window.location);
   startView('route_change', Date.now(), perfNow());
 }

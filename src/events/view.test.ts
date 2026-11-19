@@ -140,4 +140,20 @@ describe('views', () => {
     expect(updates(id).at(-1)!.view_is_active).toBe(0);
     expect(view.currentViewId()).toBe('');
   });
+
+  it('starts no view for events sent while the page is left', () => {
+    window.dispatchEvent(new Event('pagehide'));
+    view.ensureView();
+    expect(view.currentViewId()).toBe('');
+  });
+
+  it('starts a bf_cache view when the page comes back from the cache', () => {
+    window.dispatchEvent(new Event('pagehide'));
+    const show = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(show, 'persisted', { value: true });
+    window.dispatchEvent(show);
+    const id = view.currentViewId();
+    expect(id).not.toBe('');
+    expect(updates(id)[0].view_loading_type).toBe('bf_cache');
+  });
 });

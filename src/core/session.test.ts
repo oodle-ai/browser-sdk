@@ -95,6 +95,19 @@ describe('session lifetime', () => {
     expect(s.getSessionId()).toBe('');
   });
 
+  it('is extended, never started, by the tab becoming visible', async () => {
+    const s = await reload();
+    s.touchSession();
+    const id = s.getSessionId();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    s.extendSession();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    expect(s.getSessionId()).toBe(id);
+    vi.setSystemTime(Date.now() + 16 * MIN);
+    s.extendSession();
+    expect(s.getSessionId()).toBe('');
+  });
+
   it('starts the next session on the next user activity and tells listeners', async () => {
     const s = await reload();
     s.touchSession();
@@ -151,6 +164,71 @@ describe('sessions across tabs', () => {
     const tab = a.getTabId();
     const again = await reload();
     expect(again.getTabId()).toBe(tab);
+  });
+
+  it('ends a session another tab replaced at its own expiry', async () => {
+    const s = await reload();
+    s.touchSession();
+    const first = s.getSessionId();
+    const lastActivity = Date.now();
+    // Another tab starts the next session after this one expired.
+    vi.setSystemTime(Date.now() + 30 * MIN);
+    localStorage.setItem(
+      '__oodle_session_v2',
+      JSON.stringify({ id: 'other', createdAt: Date.now(), lastActivity: Date.now(), started: true }),
+    );
+    expect(s.sessionEndedAt(first)).toBe(lastActivity + 15 * MIN);
+    // Nor does this tab adopt it without its own user's activity.
+    expect(s.getSessionId()).toBe('');
+    s.touchSession();
+    expect(s.getSessionId()).toBe('other');
+  });
+
+  it('joins a session another tab created at the same moment', async () => {
+    const s = await reload();
+    s.touchSession();
+    const mine = s.getSessionId();
+    // Another tab woke too and wrote its own session over ours.
+    localStorage.setItem(
+      '__oodle_session_v2',
+      JSON.stringify({ id: 'theirs', createdAt: Date.now(), lastActivity: Date.now(), started: true }),
+    );
+    await vi.advanceTimersByTimeAsync(150);
+    expect(mine).not.toBe('theirs');
+    expect(s.getSessionId()).toBe('theirs');
+  });
+
+  it('takes a new tab id when another open tab holds the same one', async () => {
+    // A stand-in channel shared by every instance, as tabs share one.
+    const peers: any[] = [];
+    class FakeChannel {
+      onmessage: ((e: { data: unknown }) => void) | null = null;
+      constructor() { peers.push(this); }
+      postMessage(data: unknown) {
+        for (const p of peers) if (p !== this) queueMicrotask(() => p.onmessage?.({ data }));
+      }
+      close() { peers.splice(peers.indexOf(this), 1); }
+    }
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    try {
+      const first = await reload();
+      first.initSessionListeners();
+      const id = first.getTabId();
+      // A duplicated tab starts with a copy of this tab's state.
+      const copy = sessionStorage.getItem('__oodle_tab');
+      vi.resetModules();
+      const second = await import('./session');
+      second._resetSessionModule();
+      if (copy) sessionStorage.setItem('__oodle_tab', copy);
+      second.initSessionListeners();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(first.getTabId()).toBe(id);
+      expect(second.getTabId()).not.toBe(id);
+      first.destroySessionListeners();
+      second.destroySessionListeners();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

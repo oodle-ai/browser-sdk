@@ -63,6 +63,7 @@ vi.mock('../replay/recorder', () => ({
 const enqueued: Record<string, any>[] = [];
 
 vi.mock('../core/transport', () => ({
+  onPageExit: () => () => {},
   enqueue: (_key: string, item: Record<string, unknown>) => {
     enqueued.push(item);
   },
@@ -267,6 +268,29 @@ describe('privacy options on events', () => {
       'promise:TypeError:wrapped boom',
       'promise:SyntaxError:native boom',
     ]);
+  });
+
+  it('records a rejection zone.js also logged to the console once', () => {
+    console.error = () => {};
+    const Zone: any = { __symbol__: (n: string) => '__zone_symbol__' + n };
+    (globalThis as any).Zone = Zone;
+    try {
+      faro.initEvents();
+      faro.captureZoneRejections();
+      const handler = Zone['__zone_symbol__unhandledPromiseRejectionHandler'];
+      // zone.js logs the rejection, then calls its handler with the
+      // same error.
+      const err = new TypeError('Failed to fetch');
+      console.error('Unhandled Promise rejection:', err);
+      handler(err);
+    } finally {
+      delete (globalThis as any).Zone;
+    }
+    const errors = enqueued.filter(
+      (e) => e.event_type === 'error' || (e.event_type === 'console' && e.error_type),
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ event_type: 'console', error_type: 'TypeError' });
   });
 
   it('records no zone.js rejection after the SDK stopped', () => {

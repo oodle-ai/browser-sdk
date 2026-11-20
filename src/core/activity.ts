@@ -16,28 +16,42 @@
 export const IDLE_MS = 100;
 export const MAX_WAIT_MS = 10_000;
 
-type Listener = () => void;
+/**
+ * What changed: a DOM change, or a request that started or ended. A
+ * request carries its index, so a wait can ignore requests that were
+ * already in flight when it began.
+ */
+type ActivityEvent =
+  | { kind: 'dom' }
+  | { kind: 'start'; index: number }
+  | { kind: 'end'; index: number };
+type Listener = (e: ActivityEvent) => void;
 
 const listeners = new Set<Listener>();
 let pendingRequests = 0;
+let nextRequestIndex = 0;
 let observer: MutationObserver | null = null;
 
-function notify() {
+function notify(e: ActivityEvent) {
   for (const l of listeners) {
     try {
-      l();
+      l(e);
     } catch {
       // One listener must not stop the others.
     }
   }
 }
 
+// One shared event: DOM changes come often, and need no fields.
+const DOM_EVENT: ActivityEvent = { kind: 'dom' };
+const notifyDom = () => notify(DOM_EVENT);
+
 function ensureObserver() {
   if (observer || typeof MutationObserver === 'undefined') return;
   if (typeof document === 'undefined' || !document.documentElement) {
     return;
   }
-  observer = new MutationObserver(notify);
+  observer = new MutationObserver(notifyDom);
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
@@ -52,18 +66,39 @@ function releaseObserver() {
   observer = null;
 }
 
-export function requestStarted() {
+/** Returns the request's index, to pass to `requestEnded`. */
+export function requestStarted(): number {
   pendingRequests++;
-  notify();
+  const index = nextRequestIndex++;
+  notify({ kind: 'start', index });
+  return index;
 }
 
-export function requestEnded() {
+export function requestEnded(index: number) {
   pendingRequests = Math.max(0, pendingRequests - 1);
-  notify();
+  notify({ kind: 'end', index });
 }
 
 export function pendingRequestCount(): number {
   return pendingRequests;
+}
+
+/**
+ * Calls `onAny` on every DOM change and request start until the returned
+ * function is called. A click watches the page from its pointer down,
+ * as some controls (tabs, selects) change the page on pointer down,
+ * before the click event fires.
+ */
+export function watchActivity(onAny: () => void): () => void {
+  const listener: Listener = (e) => {
+    if (e.kind !== 'end') onAny();
+  };
+  listeners.add(listener);
+  ensureObserver();
+  return () => {
+    listeners.delete(listener);
+    releaseObserver();
+  };
 }
 
 export interface ActivityResult {
@@ -86,6 +121,12 @@ export function waitForIdle(
   maxWaitMs = MAX_WAIT_MS,
 ): () => void {
   let lastActivity: number | null = null;
+  // Only requests that start after the wait began are its work. A
+  // request already in flight, such as a background poll, is neither a
+  // response to a click nor a reason to keep waiting: counting it would
+  // hide every dead click on a page that polls.
+  const firstIndex = nextRequestIndex;
+  let pending = 0;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let maxTimer: ReturnType<typeof setTimeout> | null = null;
   let finished = false;
@@ -103,7 +144,7 @@ export function waitForIdle(
   const armIdle = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      if (pendingRequests > 0) {
+      if (pending > 0) {
         armIdle();
         return;
       }
@@ -115,22 +156,29 @@ export function waitForIdle(
     }, IDLE_MS);
   };
 
-  function onActivity() {
+  function onActivity(e: ActivityEvent) {
+    if (e.kind !== 'dom') {
+      if (e.index < firstIndex) return;
+      pending = Math.max(0, pending + (e.kind === 'start' ? 1 : -1));
+    }
     lastActivity = Date.now();
     armIdle();
   }
 
   listeners.add(onActivity);
   ensureObserver();
-  if (pendingRequests > 0) lastActivity = startMs;
   armIdle();
-  maxTimer = setTimeout(() => {
-    finish({
-      endMs: lastActivity,
-      hadActivity: lastActivity !== null,
-      timedOut: true,
-    });
-  }, maxWaitMs);
+  // An infinite wait has no timer: setTimeout would read Infinity as 0
+  // and end the wait at once.
+  if (Number.isFinite(maxWaitMs)) {
+    maxTimer = setTimeout(() => {
+      finish({
+        endMs: lastActivity,
+        hadActivity: lastActivity !== null,
+        timedOut: true,
+      });
+    }, maxWaitMs);
+  }
 
   return () => {
     finished = true;
@@ -144,6 +192,7 @@ export function waitForIdle(
 export function resetActivity() {
   listeners.clear();
   pendingRequests = 0;
+  nextRequestIndex = 0;
   if (observer) {
     observer.disconnect();
     observer = null;

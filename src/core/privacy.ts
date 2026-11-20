@@ -620,7 +620,7 @@ export const BLOCK_SELECTOR =
   '[data-oodle-privacy="hidden"],' + '.oodle-privacy-hidden';
 export const MASK_TEXT_SELECTOR =
   '[data-oodle-privacy="mask"],' + '.oodle-privacy-mask';
-const ACTION_MASK_SELECTOR =
+export const ACTION_MASK_SELECTOR =
   BLOCK_SELECTOR +
   ',' +
   MASK_TEXT_SELECTOR +

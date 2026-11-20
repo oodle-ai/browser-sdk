@@ -56,6 +56,7 @@ vi.mock('rrweb', () => ({
 let exitFlushHook: (() => void) | null = null;
 
 vi.mock('../core/transport', () => ({
+  onPageExit: () => () => {},
   enqueue: (key: string, payload: any) =>
     enqueued.push({ key, payload }),
   isServerRateLimited: () => rateLimited,

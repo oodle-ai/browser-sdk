@@ -75,6 +75,18 @@ let globalMaxWaitTimer: ReturnType<
 > | null = null;
 
 let exitFlushHook: (() => void) | null = null;
+const pageExitProducers = new Set<() => void>();
+
+/**
+ * Registers work that must run when the page goes away for good
+ * (pagehide), before the exit flush. Unlike the exit flush hook, it does
+ * not run when the tab is only hidden: work still in progress then may
+ * finish later. Returns a function that removes it.
+ */
+export function onPageExit(fn: () => void): () => void {
+  pageExitProducers.add(fn);
+  return () => pageExitProducers.delete(fn);
+}
 let inExitFlush = false;
 
 function getFlushInterval(): number {
@@ -889,7 +901,16 @@ export function initTransportListeners() {
       flushAll(true);
     }
   };
-  exitHandler = () => flushAll(true);
+  exitHandler = () => {
+    for (const fn of pageExitProducers) {
+      try {
+        fn();
+      } catch {
+        // One producer must not cost the others, or the flush.
+      }
+    }
+    flushAll(true);
+  };
   pageShowHandler = (
     e: PageTransitionEvent,
   ) => {

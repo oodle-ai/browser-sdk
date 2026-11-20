@@ -137,13 +137,37 @@ function loadShared(): SharedSession | null {
   return memShared;
 }
 
+/**
+ * The last record this tab saw of each session, by id. When another tab
+ * replaces a session, the shared record no longer holds it, and a view
+ * of the old session needs the old record to know when it ended.
+ */
+const seenSessions = new Map<string, { lastActivity: number; createdAt: number }>();
+
+function remember(s: SharedSession) {
+  const prev = seenSessions.get(s.id);
+  seenSessions.set(s.id, {
+    lastActivity: Math.max(prev?.lastActivity ?? 0, s.lastActivity),
+    createdAt: s.createdAt,
+  });
+  // Few sessions a tab ever sees; a cap keeps a long-lived tab small.
+  if (seenSessions.size > 20) {
+    const oldest = seenSessions.keys().next().value;
+    if (oldest !== undefined) seenSessions.delete(oldest);
+  }
+}
+
 function cacheShared(s: SharedSession | null): SharedSession | null {
-  if (s) memShared = s;
+  if (s) {
+    memShared = s;
+    remember(s);
+  }
   return s;
 }
 
 function saveShared(s: SharedSession) {
   memShared = s;
+  remember(s);
   sharedReadAt = Date.now();
   writeJSON(local(), SHARED_KEY, s);
 }
@@ -330,6 +354,28 @@ let lastActivityWrite = 0;
  * Records user activity. Starts a session when none is live:
  * a page load and a user action are what may start one.
  */
+/**
+ * Extends the live session without starting a new one. A tab that only
+ * became or stayed visible keeps its session going, but it is no user
+ * action, so it must not start the next session: switching back to an
+ * idle tab would otherwise count as a new visit.
+ */
+export function extendSession() {
+  const now = Date.now();
+  sharedReadAt = 0;
+  const s = loadShared();
+  if (!isLive(s, now)) return;
+  if (now - lastActivityWrite >= ACTIVITY_WRITE_MS) {
+    s.lastActivity = Math.max(s.lastActivity, now);
+    saveShared(s);
+    lastActivityWrite = now;
+  }
+  bindTab(s.id);
+}
+
+/** How often a visible tab extends its session while it stays visible. */
+export const VISIBLE_EXTEND_MS = 60_000;
+
 export function touchSession() {
   const now = Date.now();
   let s = loadShared();
@@ -342,6 +388,7 @@ export function touchSession() {
   if (!isLive(s, now)) {
     if (!adoptLegacy(now)) {
       s = newSession(now);
+      settleNewSession(s);
     } else {
       s = loadShared();
     }
@@ -354,6 +401,35 @@ export function touchSession() {
   if (s) bindTab(s.id);
 }
 
+/** How long after starting a session a tab checks for one made beside it. */
+const SETTLE_MS = 100;
+/** Sessions created this close together were created by tabs racing. */
+const RACE_WINDOW_MS = 2000;
+
+/**
+ * Joins a session another tab created at the same moment. Tabs that
+ * wake together (a restored browser, a laptop opened) each find no live
+ * session and each create one; the shared record keeps the last write.
+ * A tab that finds a session there other than its own, created within
+ * the race window, joins it, so the tabs end in one session rather than
+ * one each.
+ */
+function settleNewSession(mine: SharedSession) {
+  setTimeout(() => {
+    sharedReadAt = 0;
+    const s = loadShared();
+    if (
+      s &&
+      s.id !== mine.id &&
+      isLive(s, Date.now()) &&
+      Math.abs(s.createdAt - mine.createdAt) <= RACE_WINDOW_MS &&
+      loadTab()?.sessionId === mine.id
+    ) {
+      bindTab(s.id);
+    }
+  }, SETTLE_MS);
+}
+
 /**
  * The live session id, or '' when the session expired and no
  * user activity has started the next one. Never starts a
@@ -363,8 +439,37 @@ export function getSessionId(): string {
   const now = Date.now();
   const s = loadShared();
   if (!isLive(s, now)) return '';
+  // A tab whose own session another tab replaced stays out of the new
+  // one until its user acts in it (touchSession). Adopting on any event,
+  // a background poll included, started views in tabs nobody was using,
+  // and moved the new session's start to the first of those tabs.
+  const bound = loadTab()?.sessionId;
+  if (bound && bound !== s.id) return '';
   bindTab(s.id);
   return s.id;
+}
+
+/**
+ * When the session `id` stopped being live: its last activity plus the
+ * inactivity timeout, or its maximum duration, whichever comes first.
+ * Null when the shared record is not that session (another tab renewed
+ * it) or the session is still live.
+ */
+export function sessionEndedAt(id: string): number | null {
+  sharedReadAt = 0;
+  const s = loadShared();
+  // A session another tab replaced has ended too: by the record this
+  // tab last saw of it. Without that, a view of a replaced session kept
+  // updating under it until the page went away, which made sessions of
+  // one view that lasted most of an hour.
+  const rec = s && s.id === id ? s : seenSessions.get(id);
+  if (!rec) return s && s.id !== id ? Date.now() : null;
+  const end = Math.min(
+    rec.lastActivity + SESSION_TIMEOUT_MS,
+    rec.createdAt + SESSION_MAX_DURATION_MS,
+  );
+  if (s && s.id !== id) return Math.min(end, Date.now());
+  return Date.now() > end ? end : null;
 }
 
 export function getTabId(): string {
@@ -419,12 +524,49 @@ export function isReplaySampled(): boolean {
 
 let activityHandler: (() => void) | null = null;
 let visHandler: (() => void) | null = null;
+let visibleTimer: ReturnType<typeof setInterval> | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ['click', 'keydown', 'touchstart', 'scroll'];
+
+let tabChannel: BroadcastChannel | null = null;
+
+/**
+ * Gives this tab a new id when another open tab holds the same one. A
+ * duplicated tab, or one opened from another, starts with a copy of
+ * its sessionStorage, tab id included. Two tabs then wrote events and
+ * replay segments under one id, and their segments overwrote each
+ * other. The new tab says its id on a channel; a tab that has it
+ * answers, and the new tab takes a fresh id.
+ */
+function claimTabId() {
+  if (typeof BroadcastChannel === 'undefined') return;
+  try {
+    tabChannel = new BroadcastChannel('oodle_rum_tabs');
+  } catch {
+    tabChannel = null;
+    return;
+  }
+  const mine = currentTab().tabId;
+  const helloAt = Date.now();
+  tabChannel.onmessage = (e: MessageEvent) => {
+    const m = e.data as { type?: string; tabId?: string } | null;
+    const t = currentTab();
+    if (!m || m.tabId !== t.tabId) return;
+    if (m.type === 'hello') {
+      tabChannel?.postMessage({ type: 'taken', tabId: t.tabId });
+    } else if (m.type === 'taken' && t.tabId === mine && Date.now() - helloAt < 5000) {
+      t.tabId = generateId();
+      t.replaySegmentSeq = 0;
+      saveTabNow(t);
+    }
+  };
+  tabChannel.postMessage({ type: 'hello', tabId: mine });
+}
 
 export function initSessionListeners() {
   if (typeof document === 'undefined') return;
   destroySessionListeners();
+  claimTabId();
   // Scroll and key events come in bursts; one touch a second
   // is enough to keep a 15 minute timeout fresh.
   let lastTouch = 0;
@@ -446,12 +588,17 @@ export function initSessionListeners() {
   window.addEventListener('storage', storageHandler);
   visHandler = () => {
     if (document.visibilityState === 'visible') {
-      touchSession();
+      extendSession();
     } else if (memTab) {
       saveTabNow(memTab);
     }
   };
   document.addEventListener('visibilitychange', visHandler);
+  // A tab on screen is in use even when the user only reads it, so it
+  // keeps the session going while it stays visible.
+  visibleTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') extendSession();
+  }, VISIBLE_EXTEND_MS);
 }
 
 export function destroySessionListeners() {
@@ -467,6 +614,14 @@ export function destroySessionListeners() {
   if (visHandler) {
     document.removeEventListener('visibilitychange', visHandler);
     visHandler = null;
+  }
+  if (visibleTimer) {
+    clearInterval(visibleTimer);
+    visibleTimer = null;
+  }
+  if (tabChannel) {
+    tabChannel.close();
+    tabChannel = null;
   }
   if (storageHandler) {
     window.removeEventListener('storage', storageHandler);
@@ -507,6 +662,7 @@ export function _resetSessionModule() {
   sharedReadAt = 0;
   lastActivityWrite = 0;
   renewListeners.clear();
+  seenSessions.clear();
   if (tabSaveTimer) clearTimeout(tabSaveTimer);
   tabSaveTimer = null;
 }

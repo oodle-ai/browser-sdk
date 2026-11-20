@@ -14,9 +14,17 @@
  */
 export declare const IDLE_MS = 100;
 export declare const MAX_WAIT_MS = 10000;
-export declare function requestStarted(): void;
-export declare function requestEnded(): void;
+/** Returns the request's index, to pass to `requestEnded`. */
+export declare function requestStarted(): number;
+export declare function requestEnded(index: number): void;
 export declare function pendingRequestCount(): number;
+/**
+ * Calls `onAny` on every DOM change and request start until the returned
+ * function is called. A click watches the page from its pointer down,
+ * as some controls (tabs, selects) change the page on pointer down,
+ * before the click event fires.
+ */
+export declare function watchActivity(onAny: () => void): () => void;
 export interface ActivityResult {
     /** Epoch ms of the last activity, or null when there was none. */
     endMs: number | null;

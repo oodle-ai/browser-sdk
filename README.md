@@ -171,20 +171,58 @@ and when it ends (`view_is_active: 0`). Every send has a higher
 has `view_is_new: 1`.
 
 A view reports its loading time (until the page has no pending request
-and no DOM change for 100 ms), time spent, and how many actions,
+and no DOM change for 100 ms, with no time limit; a load that ends after
+the tab was hidden has none), time spent, and how many actions,
 errors, resources, long tasks and frustrations happened in it. LCP,
 FCP, TTFB and FID are page load vitals and are on the `initial_load`
-view only. CLS and INP are measured for each view.
+view only. CLS and INP are measured for each view; INP includes the first input
+at any duration, so a page with only fast interactions still has one.
+
+A view ends with its session. When the session expires (15 minutes
+without activity, or 4 hours), the view sends one last update dated at
+the session's end and then nothing more, so a tab left open does not
+stretch the session or the view's time spent.
 
 ### Actions
+
+Only work that starts after a click counts as its response: a request
+already in flight, such as a background poll, neither ends nor extends
+it. A click still in progress when the page goes away is sent then.
 
 A click is sent when the page stops doing work because of it, with
 its loading time and the errors, resources and long tasks that
 happened during it. Events during an action carry its `action_id`.
 `action_frustration_types` lists `rage_click` (three or more clicks on
 one element within a second, sent as one action), `dead_click` (the
-page did nothing; not counted for form fields or text selection) and
-`error_click` (a JavaScript error happened during the action).
+page did nothing; not counted for text fields, selects, links, canvas,
+editable text, text selection, or when the user scrolls or types after
+the click, or changes a field such as a checkbox; a button that
+changes nothing is dead) and
+`error_click` (a JavaScript error happened during the action). Clicks
+with scrolling or a text selection are never a rage click, and a rage
+click is also dead when any of its clicks got no response.
+
+An action is named after what the user clicked. The clicked element
+and up to 10 parents are checked for a name they give themselves (a
+form label, a button's or link's text, `aria-label`,
+`aria-labelledby`, `alt`, `title`, `placeholder`), and failing that for
+visible text. The first line is used, cut at 80 characters. A click in a masked part
+of the page, or with `actionText: 'mask'`, reads no text from the
+element or its parents. Text taken from a parent leaves out masked
+parts, form fields and editable text, and labels in a masked part are
+not used.
+
+A tab that becomes visible, or stays visible, keeps its session going
+but never starts a new one: only a user action does.
+
+A tab whose session another tab replaced stays out of the new session
+until its own user acts in it, and its view ends at the old session's
+expiry.
+
+A click counts page changes from its pointer down, so a tab or menu
+that opens on pointer down is not a dead click. A click on a label is
+one action, not a second one for the control it names. An error logged
+with `console.error` and then rejected (as zone.js does) is one error.
 
 Every event has an `event_id`, the `view_id` of the view it happened
 in, and `browser_version` and `os_version`.

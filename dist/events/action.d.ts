@@ -23,6 +23,14 @@ export type EmitAction = (data: Record<string, unknown>) => void;
 export declare function currentActionId(): string;
 /** Counts an event against every action in progress. */
 export declare function countInAction(data: Record<string, unknown>): void;
+/**
+ * Sends every click still in progress when the page goes away. A click
+ * with no response ends within 100 ms, so one still waiting got a
+ * response: it is sent as a click, with its loading time up to now.
+ * Without this, the click that left the page, often a link, is lost.
+ */
+export declare function sendPendingOnExit(): void;
+export declare function onPointerDown(): void;
 export declare function onClick(e: MouseEvent): void;
 export declare function initActions(emitAction: EmitAction): void;
 export declare function destroyActions(): void;

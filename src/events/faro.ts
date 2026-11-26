@@ -1906,9 +1906,15 @@ function initIframePatching() {
             node instanceof HTMLElement &&
             node.childElementCount > 0
           ) {
-            node
-              .querySelectorAll('iframe')
-              .forEach(patchIframeOnLoad);
+            // Runs for every added subtree, so a large
+            // re-render hits it thousands of times. The
+            // tag lookup skips the selector parse and the
+            // static list querySelectorAll builds.
+            const frames =
+              node.getElementsByTagName('iframe');
+            for (let i = 0; i < frames.length; i++) {
+              patchIframeOnLoad(frames[i]);
+            }
           }
         }
       }

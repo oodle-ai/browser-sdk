@@ -669,4 +669,86 @@ describe('replay recorder', () => {
     expect(totalAdds).toBe(400);
     expect(takeFullSnapshot).not.toHaveBeenCalled();
   });
+
+  /**
+   * Moves time on with a keypress every minute, so the
+   * 5-minute idle pause does not stop recording.
+   */
+  function advanceActive(ms: number) {
+    for (let t = 0; t < ms; t += 60_000) {
+      window.dispatchEvent(new Event('keydown'));
+      vi.advanceTimersByTime(Math.min(60_000, ms - t));
+    }
+  }
+
+  it('runs checkouts itself instead of through rrweb', () => {
+    // rrweb's checkout would snapshot while DOM changes are
+    // still queued in mutation-defer.ts.
+    expect(recordOpts.checkoutEveryNms).toBeUndefined();
+
+    emit(fullSnapshot(Date.now()));
+    vi.advanceTimersByTime(1_000);
+    emit(incremental(Date.now()));
+    vi.advanceTimersByTime(10);
+    expect(takeFullSnapshot).not.toHaveBeenCalled();
+
+    // Same trigger as rrweb: the first event after the
+    // interval, not the interval itself.
+    advanceActive(360_000);
+    expect(takeFullSnapshot).not.toHaveBeenCalled();
+    emit(incremental(Date.now()));
+    vi.advanceTimersByTime(10);
+    expect(takeFullSnapshot).toHaveBeenCalledTimes(1);
+    expect(takeFullSnapshot).toHaveBeenCalledWith(true);
+
+    // The snapshot restarts the interval.
+    emit(incremental(Date.now()));
+    vi.advanceTimersByTime(10);
+    expect(takeFullSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands rrweb queued DOM changes before taking a snapshot', async () => {
+    const defer = await import('./mutation-defer');
+    const order: string[] = [];
+    const cb = defer.wrapMutationCallback(() =>
+      order.push('mutations'),
+    );
+    cb(
+      [{ type: 'childList' } as unknown as MutationRecord],
+      {} as MutationObserver,
+    );
+    expect(order).toEqual([]);
+    takeFullSnapshot.mockImplementation(() => {
+      order.push('snapshot');
+      emit(fullSnapshot(Date.now()));
+    });
+
+    emit(fullSnapshot(Date.now()));
+    advanceActive(361_000);
+    emit(incremental(Date.now()));
+    // The incremental event runs before the timer, so
+    // queue the change after it and before the checkout.
+    cb(
+      [{ type: 'childList' } as unknown as MutationRecord],
+      {} as MutationObserver,
+    );
+    vi.advanceTimersByTime(1);
+    expect(order.slice(-2)).toEqual([
+      'mutations',
+      'snapshot',
+    ]);
+  });
+
+  it('processes queued DOM changes before stopping', async () => {
+    const defer = await import('./mutation-defer');
+    const cb = vi.fn();
+    defer.wrapMutationCallback(cb)(
+      [{ type: 'childList' } as unknown as MutationRecord],
+      {} as MutationObserver,
+    );
+    expect(cb).not.toHaveBeenCalled();
+    recorder.stopReplay();
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(defer.hasDeferredMutations()).toBe(false);
+  });
 });

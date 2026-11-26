@@ -156,6 +156,14 @@ export interface OodleRumConfig {
     openTelemetry?: boolean | OtelConfig;
     flushIntervalMs?: number;
     replayFlushIntervalMs?: number;
+    /**
+     * When true (default), session replay processes DOM changes
+     * when the browser is idle (at most 100 ms later) instead of
+     * inside the task that made them, so recording does not add
+     * to interaction latency. Set to false to process them
+     * immediately, as rrweb does by default.
+     */
+    replayDeferMutations?: boolean;
     shouldSendData?: () => boolean;
     replayIdlePauseMs?: number;
     replayIdleExpireMs?: number;

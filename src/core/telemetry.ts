@@ -17,6 +17,11 @@ interface TelemetryCounters {
   replay_expensive_snapshots: number;
   replay_attributes_throttled: number;
   replay_emit_errors: number;
+  /** Full snapshots taken: start, checkout and re-base. */
+  replay_full_snapshots: number;
+  replay_snapshot_ms_total: number;
+  /** Longest single full snapshot since the last flush. */
+  replay_snapshot_ms_max: number;
 }
 
 const counters: TelemetryCounters = {
@@ -33,6 +38,9 @@ const counters: TelemetryCounters = {
   replay_expensive_snapshots: 0,
   replay_attributes_throttled: 0,
   replay_emit_errors: 0,
+  replay_full_snapshots: 0,
+  replay_snapshot_ms_total: 0,
+  replay_snapshot_ms_max: 0,
 };
 
 export function incrTelemetry(
@@ -40,6 +48,19 @@ export function incrTelemetry(
   amount = 1,
 ) {
   counters[key] += amount;
+}
+
+/**
+ * Records one full snapshot's duration. Rounded to whole
+ * milliseconds; finer is noise at this scale.
+ */
+export function recordSnapshotTelemetry(ms: number) {
+  const rounded = Math.round(ms);
+  counters.replay_full_snapshots += 1;
+  counters.replay_snapshot_ms_total += rounded;
+  if (rounded > counters.replay_snapshot_ms_max) {
+    counters.replay_snapshot_ms_max = rounded;
+  }
 }
 
 function hasData(): boolean {

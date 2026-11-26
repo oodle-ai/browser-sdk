@@ -1915,7 +1915,11 @@ function initIframePatching() {
     },
   );
 
-  observer.observe(document.documentElement, {
+  // The document, not its root element: an SDK started from
+  // an inline script in <head> before <html> is parsed (or
+  // injected before any markup) finds no documentElement,
+  // and observe(null) throws out of init().
+  observer.observe(document, {
     childList: true,
     subtree: true,
   });

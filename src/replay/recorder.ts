@@ -15,6 +15,7 @@ import {
 import { estimateJsonBytes } from '../core/size';
 import { incrTelemetry } from '../core/telemetry';
 import { createMutationThrottler } from './mutation-throttle';
+import { orderAdds } from './order-adds';
 import {
   enqueue,
   isServerRateLimited,
@@ -50,6 +51,16 @@ const MAX_PENDING_BYTES = 8_000_000;
 const FULL_SNAPSHOT = 2;
 const INCREMENTAL_SNAPSHOT = 3;
 const META = 4;
+const MUTATION_SOURCE = 0;
+
+interface MutationLike {
+  source?: number;
+  adds?: {
+    parentId: number;
+    nextId?: number | null;
+    node: { id: number };
+  }[];
+}
 
 /**
  * Absolute ceiling on mutation events accepted per
@@ -643,6 +654,18 @@ function handleEvent(event: eventWithTime) {
     dropEvent();
     requestRebase();
     return;
+  }
+
+  // See order-adds.ts: without this, rrweb's player drops
+  // rows from replays of re-sorted lists.
+  const data = (event as { data?: MutationLike }).data;
+  if (
+    data &&
+    data.source === MUTATION_SOURCE &&
+    Array.isArray(data.adds) &&
+    data.adds.length > 1
+  ) {
+    data.adds = orderAdds(data.adds);
   }
 
   const now = Date.now();

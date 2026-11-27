@@ -1167,7 +1167,7 @@ async function uc(e) {
     return on(e);
   }
 }
-const lc = "0.7.0", go = 5e3, ki = 50, Ci = 5e5, _o = 256e3, re = "replay", Mi = 8e4, Li = 32, fc = 2e7, dc = 5, pc = 1e3, mc = 6e4, hc = 500, Ri = 63e3;
+const lc = "0.8.0", go = 5e3, ki = 50, Ci = 5e5, _o = 256e3, re = "replay", Mi = 8e4, Li = 32, fc = 2e7, dc = 5, pc = 1e3, mc = 6e4, hc = 500, Ri = 63e3;
 let Xt = 0;
 function Oi() {
   return Ri - Xt;
@@ -3083,7 +3083,7 @@ async function ft() {
 }
 async function Tl() {
   if (!ie) return;
-  const { record: e } = await import("./rrweb-CE6fdw-N.js");
+  const { record: e } = await import("./rrweb-BSxQ50SL.js");
   if (!ie || le || j) return;
   ce = e, De = !1, oe = 0, Le = Date.now(), Jr.reset(), Jt = 0, fs(
     x().replayDeferMutations !== !1,
@@ -4215,7 +4215,7 @@ const Tf = {
       e.replaySampleRate ?? 100
     ), be = !0, di(), Wl(), wo(), Oa(), za(), Ic(() => {
       wo();
-    }), e.sessionReplay !== !1 && hi() && Ml(), ql(), e.openTelemetry && import("./tracing-C1-riU8J.js").then(
+    }), e.sessionReplay !== !1 && hi() && Ml(), ql(), e.openTelemetry && import("./tracing-DV8NWOcJ.js").then(
       (t) => t.initOtelTracing(e)
     ).catch((t) => {
       console.warn(

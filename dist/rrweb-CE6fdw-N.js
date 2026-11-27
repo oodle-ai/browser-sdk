@@ -1,4 +1,4 @@
-import { w as hn } from "./index-BRJEJuG5.js";
+import { w as hn } from "./index-DV6Jk0LE.js";
 var pn = Object.defineProperty, dn = (e, t, r) => t in e ? pn(e, t, { enumerable: !0, configurable: !0, writable: !0, value: r }) : e[t] = r, A = (e, t, r) => dn(e, typeof t != "symbol" ? t + "" : t, r), Gr, mn = Object.defineProperty, gn = (e, t, r) => t in e ? mn(e, t, { enumerable: !0, configurable: !0, writable: !0, value: r }) : e[t] = r, Jr = (e, t, r) => gn(e, typeof t != "symbol" ? t + "" : t, r), Q = /* @__PURE__ */ ((e) => (e[e.Document = 0] = "Document", e[e.DocumentType = 1] = "DocumentType", e[e.Element = 2] = "Element", e[e.Text = 3] = "Text", e[e.CDATA = 4] = "CDATA", e[e.Comment = 5] = "Comment", e))(Q || {});
 const Yr = {
   Node: [
@@ -900,7 +900,7 @@ function Ne(e, t) {
   let N;
   l.hasNode(e) ? N = l.getId(e) : oo(P, n) || !M && P.type === Q.Text && !P.textContent.replace(/^\s+|\s+$/gm, "").length ? N = Ue : N = Oi();
   const R = Object.assign(P, { id: N });
-  if (l.add(e, R), N === Ue)
+  if (l.add(e, { id: R.id, type: R.type }), N === Ue)
     return null;
   v && v(e);
   let ae = !o;
@@ -8131,7 +8131,7 @@ function Oe(e = {}) {
       window.parent.postMessage(ie, "*");
     }
     if (H.type === T.FullSnapshot)
-      J = H, $ = 0;
+      J = { timestamp: H.timestamp }, $ = 0;
     else if (H.type === T.IncrementalSnapshot) {
       if (H.data.source === L.Mutation && H.data.isAttachIframe)
         return;

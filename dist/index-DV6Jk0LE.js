@@ -3083,7 +3083,7 @@ async function ft() {
 }
 async function Tl() {
   if (!ie) return;
-  const { record: e } = await import("./rrweb-CCauZnlI.js");
+  const { record: e } = await import("./rrweb-CE6fdw-N.js");
   if (!ie || le || j) return;
   ce = e, De = !1, oe = 0, Le = Date.now(), Jr.reset(), Jt = 0, fs(
     x().replayDeferMutations !== !1,
@@ -4215,7 +4215,7 @@ const Tf = {
       e.replaySampleRate ?? 100
     ), be = !0, di(), Wl(), wo(), Oa(), za(), Ic(() => {
       wo();
-    }), e.sessionReplay !== !1 && hi() && Ml(), ql(), e.openTelemetry && import("./tracing-B5i1O42f.js").then(
+    }), e.sessionReplay !== !1 && hi() && Ml(), ql(), e.openTelemetry && import("./tracing-C1-riU8J.js").then(
       (t) => t.initOtelTracing(e)
     ).catch((t) => {
       console.warn(

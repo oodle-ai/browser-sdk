@@ -18,6 +18,8 @@ import {
 } from './mutation-defer';
 import {
   RRWEB_CALLBACK,
+  RRWEB_LAST_SNAPSHOT,
+  RRWEB_META_ADD,
   patchRrwebSource,
 } from '../../rrweb-defer-plugin';
 
@@ -226,6 +228,11 @@ describe('rrweb build patch', () => {
       expect(out).toContain(
         `__oodleWrapMutationCallback(${RRWEB_CALLBACK})`,
       );
+      expect(out).not.toContain(RRWEB_META_ADD);
+      expect(out).not.toContain(RRWEB_LAST_SNAPSHOT);
+      expect(out).toContain(
+        'mirror2.add(n2, { id: serializedNode.id, type: serializedNode.type });',
+      );
     },
   );
 
@@ -235,5 +242,14 @@ describe('rrweb build patch', () => {
     ).toThrow(
       /found 0/,
     );
+    expect(() =>
+      patchRrwebSource(RRWEB_CALLBACK, '/defer.ts'),
+    ).toThrow(/node map insert in rrweb, found 0/);
+    expect(() =>
+      patchRrwebSource(
+        RRWEB_CALLBACK + RRWEB_META_ADD,
+        '/defer.ts',
+      ),
+    ).toThrow(/last snapshot store in rrweb, found 0/);
   });
 });

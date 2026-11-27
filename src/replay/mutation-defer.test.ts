@@ -113,6 +113,44 @@ describe('mutation deferral', () => {
     expect(seenByDocument).toBe(1);
   });
 
+  it('skips the flush when rrweb already knows the target', () => {
+    const known = document.createElement('input');
+    document.body.appendChild(known);
+    setMutationDeferral(true, (n) => n === known);
+    const cb = vi.fn();
+    wrapMutationCallback(cb)([rec(1)], observer);
+
+    known.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(cb).not.toHaveBeenCalled();
+
+    // A node added by a queued change has no id yet.
+    const added = document.createElement('button');
+    document.body.appendChild(added);
+    added.dispatchEvent(
+      new Event('pointerdown', { bubbles: true }),
+    );
+    expect(cb).toHaveBeenCalledTimes(1);
+    known.remove();
+    added.remove();
+  });
+
+  it('checks the innermost target inside a shadow root', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    const inner = document.createElement('button');
+    root.appendChild(inner);
+    // The host is known, the button inside it is not.
+    setMutationDeferral(true, (n) => n === host);
+    const cb = vi.fn();
+    wrapMutationCallback(cb)([rec(1)], observer);
+    inner.dispatchEvent(
+      new Event('click', { bubbles: true, composed: true }),
+    );
+    expect(cb).toHaveBeenCalledTimes(1);
+    host.remove();
+  });
+
   it('does not flush on scroll', () => {
     setMutationDeferral(true);
     const cb = vi.fn();

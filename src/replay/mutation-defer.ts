@@ -25,9 +25,13 @@
  * - flush before stopping rrweb, so the last changes are
  *   kept;
  * - flush before rrweb records an event that names a target
- *   node (click, input, focus), so the target already has an
- *   id. The capture listeners below handle that: they run on
- *   `window`, before rrweb's own listeners on `document`.
+ *   node (click, input, focus), if the target has no id yet
+ *   because it was added by a queued change. The capture
+ *   listeners below handle that: they run on `window`,
+ *   before rrweb's own listeners on `document`. A target
+ *   that already has an id needs no flush; flushing anyway
+ *   would make each keystroke pay for the DOM changes the
+ *   previous keystroke caused.
  *
  * Wired in at build time: a Vite plugin rewrites rrweb's
  * `initMutationObserver` to pass its (error-wrapped)
@@ -92,6 +96,7 @@ let timeoutHandle: ReturnType<
 > | null = null;
 let listenersInstalled = false;
 let flushing = false;
+let isRecorded: ((node: Node) => boolean) | null = null;
 
 /**
  * Called by the patched rrweb for every MutationObserver it
@@ -168,10 +173,15 @@ export function hasDeferredMutations(): boolean {
 /**
  * Turns deferral on or off. Turning it off flushes first, so
  * no record is left behind.
+ *
+ * `recorded` tells whether rrweb already has an id for a
+ * node. Without it, every interaction flushes.
  */
 export function setMutationDeferral(
   on: boolean,
+  recorded?: (node: Node) => boolean,
 ): void {
+  isRecorded = on ? (recorded ?? null) : null;
   if (on === enabled) return;
   if (!on) {
     flushDeferredMutations();
@@ -216,8 +226,23 @@ function cancelScheduled() {
   }
 }
 
-function onFlushEvent() {
-  if (queue.length > 0) flushDeferredMutations();
+function onFlushEvent(e: Event) {
+  if (queue.length === 0) return;
+  if (isRecorded) {
+    // The innermost target, also inside a shadow root (on
+    // window, `target` is retargeted to the host).
+    const path =
+      typeof e.composedPath === 'function'
+        ? e.composedPath()
+        : [];
+    const target = (path[0] ?? e.target) as Node | null;
+    try {
+      if (target && isRecorded(target)) return;
+    } catch {
+      // Fall through and flush.
+    }
+  }
+  flushDeferredMutations();
 }
 
 const LISTENER_OPTS: AddEventListenerOptions = {

@@ -821,6 +821,7 @@ async function doStartRecording(): Promise<void> {
   lastFullSnapshotAt = 0;
   setMutationDeferral(
     getConfig().replayDeferMutations !== false,
+    (node) => record.mirror.getId(node) !== -1,
   );
 
   // record() takes the first full snapshot synchronously

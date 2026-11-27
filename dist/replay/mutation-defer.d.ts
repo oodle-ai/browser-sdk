@@ -25,9 +25,13 @@
  * - flush before stopping rrweb, so the last changes are
  *   kept;
  * - flush before rrweb records an event that names a target
- *   node (click, input, focus), so the target already has an
- *   id. The capture listeners below handle that: they run on
- *   `window`, before rrweb's own listeners on `document`.
+ *   node (click, input, focus), if the target has no id yet
+ *   because it was added by a queued change. The capture
+ *   listeners below handle that: they run on `window`,
+ *   before rrweb's own listeners on `document`. A target
+ *   that already has an id needs no flush; flushing anyway
+ *   would make each keystroke pay for the DOM changes the
+ *   previous keystroke caused.
  *
  * Wired in at build time: a Vite plugin rewrites rrweb's
  * `initMutationObserver` to pass its (error-wrapped)
@@ -53,6 +57,9 @@ export declare function hasDeferredMutations(): boolean;
 /**
  * Turns deferral on or off. Turning it off flushes first, so
  * no record is left behind.
+ *
+ * `recorded` tells whether rrweb already has an id for a
+ * node. Without it, every interaction flushes.
  */
-export declare function setMutationDeferral(on: boolean): void;
+export declare function setMutationDeferral(on: boolean, recorded?: (node: Node) => boolean): void;
 export {};

@@ -112,6 +112,7 @@ OodleRum.trackEvent('checkout_completed', {
 | `beforeSendNetwork` | `(capture) => capture \| null \| void` | `undefined` | Change or remove captured headers and bodies before they are sent |
 | `flushIntervalMs` | `number` | `5000` | How often queued events are sent, in milliseconds |
 | `replayFlushIntervalMs` | `number` | `5000` | How often recorded replay data is sent, in milliseconds |
+| `replayDeferMutations` | `boolean` | `true` | Process recorded DOM changes when the browser is idle (at most 100 ms later), so recording does not add to interaction latency. `false` processes them immediately |
 | `replayIdlePauseMs` | `number` | `300000` | Replay recording pauses after this long without user activity (5 minutes), and resumes on the next interaction |
 | `replayIdleExpireMs` | `number` | `900000` | After this long without user activity (15 minutes) the replay ends; the next interaction starts a new one |
 | `shouldSendData` | `() => boolean` | `undefined` | Called before each send. While it returns `false`, batches are held (up to 1000, for up to 5 minutes) and retried every 5 seconds. Not checked for the last send when the page is hidden or closed |

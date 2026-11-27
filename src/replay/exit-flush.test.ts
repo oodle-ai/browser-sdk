@@ -63,6 +63,7 @@ vi.mock('../core/tags', () => ({
 
 vi.mock('../core/telemetry', () => ({
   incrTelemetry: () => {},
+  recordSnapshotTelemetry: () => {},
 }));
 
 // Keeps the request body readable so a test can assert

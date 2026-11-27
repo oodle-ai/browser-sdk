@@ -13,8 +13,17 @@ import {
   nextReplaySegmentIndex,
 } from '../core/session';
 import { estimateJsonBytes } from '../core/size';
-import { incrTelemetry } from '../core/telemetry';
+import {
+  incrTelemetry,
+  recordSnapshotTelemetry,
+} from '../core/telemetry';
 import { createMutationThrottler } from './mutation-throttle';
+import { orderAdds } from './order-adds';
+import {
+  discardDeferredMutations,
+  flushDeferredMutations,
+  setMutationDeferral,
+} from './mutation-defer';
 import {
   enqueue,
   isServerRateLimited,
@@ -50,6 +59,16 @@ const MAX_PENDING_BYTES = 8_000_000;
 const FULL_SNAPSHOT = 2;
 const INCREMENTAL_SNAPSHOT = 3;
 const META = 4;
+const MUTATION_SOURCE = 0;
+
+interface MutationLike {
+  source?: number;
+  adds?: {
+    parentId: number;
+    nextId?: number | null;
+    node: { id: number };
+  }[];
+}
 
 /**
  * Absolute ceiling on mutation events accepted per
@@ -113,6 +132,11 @@ const EXPENSIVE_SNAPSHOT_MS = 250;
  * Every checkout is a full re-serialization of the DOM.
  * Spacing them out costs seek granularity during
  * playback and saves the recorded page real work.
+ *
+ * Run by the recorder, not by rrweb's `checkoutEveryNms`:
+ * rrweb would snapshot while DOM changes are still queued
+ * in mutation-defer.ts, and replaying those after the
+ * snapshot would apply them twice.
  */
 const CHECKOUT_INTERVAL_MS = 360_000;
 
@@ -223,6 +247,12 @@ let mutationIdleCancel:
  * decide whether another one is affordable.
  */
 let lastSnapshotMs = 0;
+
+/** When the last full snapshot reached the recorder. */
+let lastFullSnapshotAt = 0;
+let checkoutTimer: ReturnType<
+  typeof setTimeout
+> | null = null;
 
 function nowMs(): number {
   return typeof performance !== 'undefined' &&
@@ -423,9 +453,7 @@ function rebase() {
   try {
     // Clears needsRebase via the emit handler once the
     // snapshot event actually arrives.
-    const startedAt = nowMs();
-    recordApi.takeFullSnapshot(true);
-    lastSnapshotMs = nowMs() - startedAt;
+    takeSnapshot();
     incrTelemetry('replay_rebases');
     if (lastSnapshotMs > EXPENSIVE_SNAPSHOT_MS) {
       incrTelemetry(
@@ -439,6 +467,57 @@ function rebase() {
     // against the stale DOM.
     stopRecording();
     void startRecording();
+  }
+}
+
+/**
+ * Takes a full snapshot after handing rrweb every queued DOM
+ * change, so the snapshot is the newest thing in the stream.
+ * Throws if rrweb does; callers decide how to recover.
+ */
+function takeSnapshot() {
+  if (!recordApi) return;
+  flushDeferredMutations();
+  const startedAt = nowMs();
+  recordApi.takeFullSnapshot(true);
+  lastSnapshotMs = nowMs() - startedAt;
+  recordSnapshotTelemetry(lastSnapshotMs);
+}
+
+/**
+ * Same trigger as rrweb's own checkout: the first event
+ * after the interval, so an idle page is not snapshotted.
+ * It runs on a later tick rather than inside rrweb's emit.
+ */
+function maybeScheduleCheckout() {
+  if (checkoutTimer) return;
+  if (lastFullSnapshotAt === 0) return;
+  if (
+    Date.now() - lastFullSnapshotAt <=
+    CHECKOUT_INTERVAL_MS
+  ) {
+    return;
+  }
+  checkoutTimer = setTimeout(() => {
+    checkoutTimer = null;
+    if (!recordApi || !stopFn) return;
+    if (recordingDisabled || needsRebase) return;
+    try {
+      takeSnapshot();
+    } catch {
+      // rrweb may have emitted part of a snapshot. Restart,
+      // as rebase() does: a fresh record() begins with its
+      // own full snapshot.
+      stopRecording();
+      void startRecording();
+    }
+  }, 0);
+}
+
+function clearCheckoutTimer() {
+  if (checkoutTimer) {
+    clearTimeout(checkoutTimer);
+    checkoutTimer = null;
   }
 }
 
@@ -620,6 +699,7 @@ function handleEvent(event: eventWithTime) {
     // Stream is re-based: incremental events are
     // meaningful again.
     needsRebase = false;
+    lastFullSnapshotAt = Date.now();
     mutationCount = 0;
     windowStart = Date.now();
     addToBuffer(event);
@@ -643,6 +723,20 @@ function handleEvent(event: eventWithTime) {
     dropEvent();
     requestRebase();
     return;
+  }
+
+  maybeScheduleCheckout();
+
+  // See order-adds.ts: without this, rrweb's player drops
+  // rows from replays of re-sorted lists.
+  const data = (event as { data?: MutationLike }).data;
+  if (
+    data &&
+    data.source === MUTATION_SOURCE &&
+    Array.isArray(data.adds) &&
+    data.adds.length > 1
+  ) {
+    data.adds = orderAdds(data.adds);
   }
 
   const now = Date.now();
@@ -724,7 +818,19 @@ async function doStartRecording(): Promise<void> {
   // ids the per-node budgets are keyed on no longer refer
   // to the same elements.
   mutationThrottler.reset();
+  lastFullSnapshotAt = 0;
+  setMutationDeferral(
+    getConfig().replayDeferMutations !== false,
+    (node) => record.mirror.getId(node) !== -1,
+  );
 
+  // record() takes the first full snapshot synchronously
+  // unless the document is still loading, in which case
+  // rrweb waits for `load` and there is nothing to time.
+  const timeInitialSnapshot =
+    typeof document !== 'undefined' &&
+    document.readyState !== 'loading';
+  const startedAt = nowMs();
   stopFn =
     record({
       sampling: {
@@ -737,7 +843,6 @@ async function doStartRecording(): Promise<void> {
         input: 'last',
       },
       slimDOMOptions: 'all',
-      checkoutEveryNms: CHECKOUT_INTERVAL_MS,
       /**
        * rrweb runs this between `lock()` and `unlock()`
        * of its mutation buffers with no `try/finally`, so
@@ -771,15 +876,24 @@ async function doStartRecording(): Promise<void> {
       maskTextSelector: MASK_TEXT_SELECTOR,
       recordCrossOriginIframes: false,
     }) ?? null;
+  if (stopFn && timeInitialSnapshot) {
+    lastSnapshotMs = nowMs() - startedAt;
+    recordSnapshotTelemetry(lastSnapshotMs);
+  }
 
   setTimeout(() => flushReplayBuffer(), 200);
 }
 
 function stopRecording() {
+  clearCheckoutTimer();
+  // Hand rrweb the queued DOM changes while it can still
+  // record them, then stop queueing.
+  setMutationDeferral(false);
   if (stopFn) {
     stopFn();
     stopFn = null;
   }
+  discardDeferredMutations();
   if (rebaseTimer) {
     clearTimeout(rebaseTimer);
     rebaseTimer = null;
@@ -934,6 +1048,7 @@ function teardownInteractionListeners() {
  * throttle.
  */
 function drainForExit() {
+  flushDeferredMutations();
   flushMutationBatch();
   flushReplayBuffer();
 }
@@ -1018,6 +1133,7 @@ export function stopReplay() {
   rebaseStreak = 0;
   mutationCount = 0;
   lastSnapshotMs = 0;
+  lastFullSnapshotAt = 0;
   pendingMutations = [];
   pendingCursor = 0;
   mutationThrottler.reset();

@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import dts from 'vite-plugin-dts';
 import pkg from './package.json';
+import { rrwebDeferPlugin } from './rrweb-defer-plugin';
 
 export default defineConfig({
   define: {
@@ -27,6 +28,7 @@ export default defineConfig({
     sourcemap: false,
   },
   plugins: [
+    rrwebDeferPlugin(),
     dts({
       rollupTypes: true,
       exclude: ['**/*.test.ts'],

@@ -38,6 +38,49 @@ const DEBOUNCE_EXTRA_MS = 500;
  */
 const KEEPALIVE_MAX_BYTES = 63_000;
 
+/**
+ * The 64KB is one quota per document, shared by every
+ * keepalive request and beacon still in flight, not a
+ * per-request cap. Tracking what this module has in
+ * flight lets a request that would not fit go out as a
+ * plain fetch instead of being refused.
+ */
+let keepaliveBytesInFlight = 0;
+
+function keepaliveRoom(): number {
+  return KEEPALIVE_MAX_BYTES - keepaliveBytesInFlight;
+}
+
+function bodyBytes(body: BodyInit, raw: string): number {
+  return body instanceof Blob ? body.size : raw.length;
+}
+
+/**
+ * POSTs with keepalive when the body fits the room left
+ * in the quota, so a send in progress survives a
+ * navigation.
+ */
+async function post(
+  url: string,
+  headers: Record<string, string>,
+  body: BodyInit,
+  bytes: number,
+): Promise<Response> {
+  const keepalive = bytes < keepaliveRoom();
+  if (keepalive) keepaliveBytesInFlight += bytes;
+  try {
+    return await fetch(url, {
+      method: 'POST',
+      headers,
+      body,
+      keepalive,
+      credentials: 'omit',
+    });
+  } finally {
+    if (keepalive) keepaliveBytesInFlight -= bytes;
+  }
+}
+
 type Payload = Record<string, unknown>;
 
 interface QueueEntry {
@@ -314,9 +357,6 @@ async function send(
     ...item,
     tags,
   }));
-  const raw = buildEnvelope([
-    { type: batchKey, items: enriched },
-  ]);
   const headers: Record<string, string> = {
     'X-OODLE-INSTANCE': config.instanceId,
     'X-API-KEY': config.apiKey,
@@ -324,9 +364,15 @@ async function send(
   };
 
   if (isExit) {
-    sendOnExit(url, headers, raw);
+    sendSectionsOnExit(url, headers, [
+      { type: batchKey, items: enriched },
+    ]);
     return;
   }
+
+  const raw = buildEnvelope([
+    { type: batchKey, items: enriched },
+  ]);
 
   if (
     ongoingBytes >= MAX_ONGOING_BYTES ||
@@ -347,14 +393,12 @@ async function send(
     if (encoding) {
       hdrs['Content-Encoding'] = encoding;
     }
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: hdrs,
+    const resp = await post(
+      url,
+      hdrs,
       body,
-      keepalive:
-        byteLen < KEEPALIVE_MAX_BYTES,
-      credentials: 'omit',
-    });
+      bodyBytes(body, raw),
+    );
     parseRateLimitHeaders(resp);
     if (
       resp.status === 429 ||
@@ -372,33 +416,59 @@ async function send(
   }
 }
 
-function sendOnExit(
+interface Section {
+  type: string;
+  items: Payload[];
+}
+
+/**
+ * A page that is going away gets one keepalive quota
+ * (see KEEPALIVE_MAX_BYTES), and anything that does not
+ * fit goes out as a plain fetch the browser cancels with
+ * the page. Sending everything as one envelope meant a
+ * large replay segment took the small sections with it:
+ * the RUM events and SDK telemetry were lost although
+ * they would have fit.
+ *
+ * So each section is sent on its own, replay last, and a
+ * section too big for the room left is split in half by
+ * item until the pieces fit. A single item that does not
+ * fit still goes as a plain fetch, which completes when
+ * the tab was only hidden.
+ */
+function sendSectionsOnExit(
   url: string,
   headers: Record<string, string>,
-  raw: string,
+  sections: Section[],
 ) {
-  const config = getConfig();
+  const ordered = [
+    ...sections.filter(
+      (s) => s.type !== REPLAY_BATCH_KEY,
+    ),
+    ...sections.filter(
+      (s) => s.type === REPLAY_BATCH_KEY,
+    ),
+  ];
+  const budget = { room: keepaliveRoom() };
+  for (const section of ordered) {
+    sendPieceOnExit(url, headers, section, budget);
+  }
+}
+
+function sendPieceOnExit(
+  url: string,
+  headers: Record<string, string>,
+  section: Section,
+  budget: { room: number },
+) {
+  const raw = buildEnvelope([section]);
+
   if (
-    typeof navigator !== 'undefined' &&
-    navigator.sendBeacon
+    raw.length < budget.room &&
+    trySendBeacon(url, raw)
   ) {
-    // The receiver reads the instance from the API key
-    // and only honours Content-Encoding from a real
-    // header, so the beacon body stays uncompressed.
-    const beaconUrl =
-      url +
-      `?api_key=${encodeURIComponent(
-        config.apiKey,
-      )}`;
-    const blob = new Blob([raw], {
-      type: 'application/json',
-    });
-    if (
-      blob.size < KEEPALIVE_MAX_BYTES &&
-      navigator.sendBeacon(beaconUrl, blob)
-    ) {
-      return;
-    }
+    budget.room -= raw.length;
+    return;
   }
 
   const { body, encoding } =
@@ -409,23 +479,103 @@ function sendOnExit(
   } else {
     delete hdrs['Content-Encoding'];
   }
+  const bytes = bodyBytes(body, raw);
 
-  const bodyBytes =
-    body instanceof Blob ? body.size : raw.length;
+  if (bytes < budget.room) {
+    budget.room -= bytes;
+    keepaliveBytesInFlight += bytes;
+    fetch(url, {
+      method: 'POST',
+      headers: hdrs,
+      body,
+      keepalive: true,
+      credentials: 'omit',
+    })
+      .catch(() =>
+        // Refused because something outside this
+        // module's count (an earlier beacon) still
+        // holds quota. Still worth a plain try.
+        fetch(url, {
+          method: 'POST',
+          headers: hdrs,
+          body,
+          credentials: 'omit',
+        }),
+      )
+      .catch(() => {
+        incrTelemetry('exit_send_failures');
+      })
+      .finally(() => {
+        keepaliveBytesInFlight -= bytes;
+      });
+    return;
+  }
 
-  // Over the keepalive ceiling the request would be
-  // rejected outright. A plain fetch still completes
-  // for the common "tab hidden" case, which is most of
-  // what reaches this path.
+  if (section.items.length > 1) {
+    const mid = Math.ceil(
+      section.items.length / 2,
+    );
+    sendPieceOnExit(
+      url,
+      headers,
+      {
+        type: section.type,
+        items: section.items.slice(0, mid),
+      },
+      budget,
+    );
+    sendPieceOnExit(
+      url,
+      headers,
+      {
+        type: section.type,
+        items: section.items.slice(mid),
+      },
+      budget,
+    );
+    return;
+  }
+
   fetch(url, {
     method: 'POST',
     headers: hdrs,
     body,
-    keepalive: bodyBytes < KEEPALIVE_MAX_BYTES,
     credentials: 'omit',
   }).catch(() => {
     incrTelemetry('exit_send_failures');
   });
+}
+
+/**
+ * The receiver reads the instance from the API key and
+ * only honours Content-Encoding from a real header, so
+ * the beacon body stays uncompressed.
+ */
+function trySendBeacon(
+  url: string,
+  raw: string,
+): boolean {
+  if (
+    typeof navigator === 'undefined' ||
+    !navigator.sendBeacon
+  ) {
+    return false;
+  }
+  const beaconUrl =
+    url +
+    `?api_key=${encodeURIComponent(
+      getConfig().apiKey,
+    )}`;
+  try {
+    return navigator.sendBeacon(
+      beaconUrl,
+      new Blob([raw], {
+        type: 'application/json',
+      }),
+    );
+  } catch {
+    return false;
+  }
 }
 
 function enqueueRetry(
@@ -511,14 +661,12 @@ async function drainRetryQueue() {
       } else {
         delete hdrs['Content-Encoding'];
       }
-      const resp = await fetch(item.url, {
-        method: 'POST',
-        headers: hdrs,
+      const resp = await post(
+        item.url,
+        hdrs,
         body,
-        keepalive:
-          byteLen < KEEPALIVE_MAX_BYTES,
-        credentials: 'omit',
-      });
+        bodyBytes(body, item.body),
+      );
       parseRateLimitHeaders(resp);
       if (
         resp.status === 429 ||
@@ -715,10 +863,7 @@ export function flushAll(isExit = false) {
 
   clearGlobalTimers();
   const tags = getTags();
-  const sections: {
-    type: string;
-    items: Payload[];
-  }[] = [];
+  const sections: Section[] = [];
 
   const sorted = Array.from(
     queues.keys(),
@@ -730,9 +875,13 @@ export function flushAll(isExit = false) {
     return ap - bp;
   });
 
+  let replayBytes = 0;
   for (const key of sorted) {
     const q = queues.get(key);
     if (!q || q.items.length === 0) continue;
+    if (key === REPLAY_BATCH_KEY) {
+      replayBytes = q.bytesEstimate;
+    }
     const batch = q.items.splice(0);
     q.upsertMap.clear();
     q.bytesEstimate = 0;
@@ -748,7 +897,6 @@ export function flushAll(isExit = false) {
 
   if (sections.length === 0) return;
 
-  const raw = buildEnvelope(sections);
   const url =
     `${config.endpoint}${INGEST_PATH}`;
   const headers: Record<string, string> = {
@@ -757,20 +905,42 @@ export function flushAll(isExit = false) {
     'Content-Type': 'application/json',
   };
 
-  const carriesReplay = sections.some(
+  if (isExit) {
+    sendSectionsOnExit(url, headers, sections);
+    return;
+  }
+
+  const replay = sections.filter(
     (s) => s.type === REPLAY_BATCH_KEY,
   );
+  const others = sections.filter(
+    (s) => s.type !== REPLAY_BATCH_KEY,
+  );
 
-  if (isExit) {
-    sendOnExit(url, headers, raw);
+  // A replay batch too big for keepalive goes as a plain
+  // fetch, which a navigation cancels. RUM events riding
+  // in the same envelope would be cancelled with it, so
+  // they get a request of their own.
+  if (
+    replay.length > 0 &&
+    others.length > 0 &&
+    replayBytes >= KEEPALIVE_MAX_BYTES
+  ) {
+    sendRaw(url, headers, buildEnvelope(others));
+    sendRaw(
+      url,
+      headers,
+      buildEnvelope(replay),
+      REPLAY_BATCH_KEY,
+    );
     return;
   }
 
   sendRaw(
     url,
     headers,
-    raw,
-    carriesReplay
+    buildEnvelope(sections),
+    replay.length > 0
       ? REPLAY_BATCH_KEY
       : undefined,
   );
@@ -802,14 +972,12 @@ async function sendRaw(
     if (encoding) {
       hdrs['Content-Encoding'] = encoding;
     }
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: hdrs,
+    const resp = await post(
+      url,
+      hdrs,
       body,
-      keepalive:
-        byteLen < KEEPALIVE_MAX_BYTES,
-      credentials: 'omit',
-    });
+      bodyBytes(body, raw),
+    );
     parseRateLimitHeaders(resp);
     if (
       resp.status === 429 ||
